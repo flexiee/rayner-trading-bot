@@ -14,7 +14,7 @@ try:
 except ImportError:
     sys.exit("tvDatafeed is not installed. Use: pip install git+https://github.com/rongardF/tvdatafeed.git")
 
-# --- Connect to TradingView (no login needed for public data) ---
+# --- Connect to TradingView ---
 tv = TvDatafeed()
 
 # --- Markets: Forex, Crypto, Commodities ---
@@ -81,7 +81,7 @@ def get_live_data(symbol_info):
         "signal_strength": min(100, max(10, volatility)),
     }
 
-# --- Signal Logic (1:3 R:R fixed) ---
+# --- Signal Logic (1:3 Risk:Reward) ---
 def generate_signal(data):
     reasons = []
     entry = data["price"]
@@ -116,7 +116,7 @@ def generate_signal(data):
         "reasons": reasons,
     }
 
-# --- Streamlit UI (if installed) ---
+# --- Streamlit UI ---
 if STREAMLIT_AVAILABLE:
     def run_streamlit_ui():
         st.set_page_config(page_title="Rayner Bot", layout="centered")
@@ -130,9 +130,14 @@ if STREAMLIT_AVAILABLE:
                 if data:
                     signal = generate_signal(data)
 
+                    # Live TradingView Chart
+                    st.subheader("📺 Live Market Chart")
                     symbol = MARKET_SYMBOLS[market][1]
                     exchange = MARKET_SYMBOLS[market][0]
+                    embed_url = f"https://s.tradingview.com/widgetembed/?symbol={exchange}:{symbol}&interval=1&theme=light&style=1&timezone=Etc%2FUTC"
+                    st.components.v1.iframe(embed_url, height=400)
 
+                    # Market Snapshot
                     st.subheader("📊 Market Snapshot")
                     st.markdown(f"**Trend:** {data['trend']}")
                     st.markdown(f"**Momentum:** {data['momentum']}")
@@ -140,6 +145,7 @@ if STREAMLIT_AVAILABLE:
                     st.markdown(f"**Support:** {data['support']}")
                     st.markdown(f"**Resistance:** {data['resistance']}")
 
+                    # Signal Section
                     st.subheader("✅ Signal")
                     st.markdown(f"**Signal:** `{signal['signal']}`")
                     st.markdown(f"**Confidence:** {signal['confidence']}%")
