@@ -1,2 +1,2 @@
 streamlit
-tvdatafeed
+git+https://github.com/rongardF/tvdatafeed.git
