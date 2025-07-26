@@ -12,18 +12,42 @@ except ImportError:
 try:
     from tvDatafeed import TvDatafeed, Interval
 except ImportError:
-    sys.exit("tvDatafeed is not installed. Please install it using 'pip install tvDatafeed'")
+    sys.exit("tvDatafeed is not installed. Please install it using 'pip install git+https://github.com/rongardF/tvdatafeed.git'")
 
 # --- Connect to TradingView (No login required for public data) ---
-tv = TvDatafeed()  # Use TvDatafeed(username, password) if login is needed
+tv = TvDatafeed()
 
-# --- Map display names to TradingView symbols ---
+# --- All Markets: Forex, Crypto, Commodities ---
 MARKET_SYMBOLS = {
+    # Forex
     "EUR/USD": ("OANDA", "EURUSD"),
     "GBP/JPY": ("OANDA", "GBPJPY"),
     "USD/JPY": ("OANDA", "USDJPY"),
     "AUD/USD": ("OANDA", "AUDUSD"),
+    "USD/CAD": ("OANDA", "USDCAD"),
+    "NZD/USD": ("OANDA", "NZDUSD"),
+    "USD/CHF": ("OANDA", "USDCHF"),
     "XAU/USD": ("OANDA", "XAUUSD"),
+
+    # Commodities
+    "Gold": ("OANDA", "XAUUSD"),
+    "Silver": ("OANDA", "XAGUSD"),
+    "Crude Oil WTI": ("OANDA", "WTICOUSD"),
+    "Crude Oil Brent": ("OANDA", "BCOUSD"),
+    "Natural Gas": ("OANDA", "NATGASUSD"),
+    "Platinum": ("OANDA", "XPTUSD"),
+
+    # Crypto
+    "Bitcoin (BTC/USD)": ("BINANCE", "BTCUSDT"),
+    "Ethereum (ETH/USD)": ("BINANCE", "ETHUSDT"),
+    "BNB (BNB/USD)": ("BINANCE", "BNBUSDT"),
+    "Solana (SOL/USD)": ("BINANCE", "SOLUSDT"),
+    "XRP (XRP/USD)": ("BINANCE", "XRPUSDT"),
+    "Dogecoin (DOGE/USD)": ("BINANCE", "DOGEUSDT"),
+    "Cardano (ADA/USD)": ("BINANCE", "ADAUSDT"),
+    "Polkadot (DOT/USD)": ("BINANCE", "DOTUSDT"),
+    "Litecoin (LTC/USD)": ("BINANCE", "LTCUSDT"),
+    "Avalanche (AVAX/USD)": ("BINANCE", "AVAXUSDT"),
 }
 
 # --- Fetch real data from TradingView ---
@@ -92,7 +116,7 @@ def generate_signal(data):
         "reasons": reasons,
     }
 
-# --- Streamlit UI (Only run if available and not in headless environments) ---
+# --- Streamlit UI (Only run if available) ---
 if STREAMLIT_AVAILABLE:
     def run_streamlit_ui():
         st.set_page_config(page_title="Rayner Teo Strategy Bot", layout="centered")
@@ -108,7 +132,8 @@ if STREAMLIT_AVAILABLE:
 
                     st.subheader("📺 Live Market Chart")
                     symbol = MARKET_SYMBOLS[market][1]
-                    st.components.v1.iframe(f"https://s.tradingview.com/widgetembed/?frameElementId=tradingview_{symbol}&symbol=OANDA%3A{symbol}&interval=1&hidesidetoolbar=1&symboledit=1&saveimage=1&toolbarbg=f1f3f6&studies=[]&theme=light&style=1&timezone=Etc%2FUTC&withdateranges=1&hidevolume=1", height=400)
+                    exchange = MARKET_SYMBOLS[market][0]
+                    st.components.v1.iframe(f"https://s.tradingview.com/widgetembed/?symbol={exchange}:{symbol}&interval=1&theme=light", height=400)
 
                     st.subheader("📊 Market Snapshot")
                     st.markdown(f"**Trend:** {data['trend']}")
