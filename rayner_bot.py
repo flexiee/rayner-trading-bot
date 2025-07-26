@@ -1,8 +1,8 @@
 import sys
 from datetime import datetime
-
 try:
     import streamlit as st
+    from streamlit.components.v1 import iframe
     STREAMLIT_AVAILABLE = True
 except ImportError:
     STREAMLIT_AVAILABLE = False
@@ -10,7 +10,7 @@ except ImportError:
 try:
     from tvDatafeed import TvDatafeed, Interval
 except ImportError:
-    sys.exit("tvDatafeed not installed. Run: pip install git+https://github.com/rongardF/tvdatafeed.git")
+    sys.exit("Install tvDatafeed: pip install git+https://github.com/rongardF/tvdatafeed.git")
 
 tv = TvDatafeed()
 
@@ -103,45 +103,51 @@ if STREAMLIT_AVAILABLE:
     def run_ui():
         st.set_page_config(layout="wide")
         st.title("📊 Rayner Pro Trading Bot")
-        
+
         if "favorites" not in st.session_state:
             st.session_state.favorites = []
         if "history" not in st.session_state:
             st.session_state.history = []
+        if "selected_market" not in st.session_state:
+            st.session_state.selected_market = "EUR/USD"
 
-        st.sidebar.header("⭐ Favorite Markets")
+        st.sidebar.header("⭐ Favorite Watchlist")
         for fav in st.session_state.favorites:
-            st.sidebar.write(f"✅ {fav}")
+            exch, sym = MARKET_SYMBOLS[fav]
+            df = tv.get_hist(sym, exch, Interval.in_1_minute, n_bars=1)
+            if df is not None and not df.empty:
+                price = df.iloc[-1]["close"]
+                st.sidebar.markdown(f"**{fav}**: `{round(price, 5)}`")
+
         st.sidebar.markdown("---")
         st.sidebar.subheader("📜 Signal History")
-        for entry in reversed(st.session_state.history[-5:]):
-            st.sidebar.markdown(f"**{entry['market']}** {entry['signal']} at `{entry['time']}`")
+        for h in reversed(st.session_state.history[-5:]):
+            st.sidebar.markdown(f"**{h['market']}** {h['signal']} at `{h['time']}`")
 
-        st.subheader("Market Category")
-        category = st.radio("", list(CATEGORIES.keys()), horizontal=True)
+        st.subheader("📂 Market Categories")
+        category = st.radio("Select Category", list(CATEGORIES.keys()), horizontal=True)
 
-        st.subheader("Markets")
         cols = st.columns(len(CATEGORIES[category]))
         for i, market in enumerate(CATEGORIES[category]):
             star = "⭐" if market in st.session_state.favorites else "☆"
-            if cols[i].button(f"{market} {star}"):
+            if cols[i].button(f"{market}"):
                 st.session_state.selected_market = market
-            if cols[i].button("Toggle Favorite", key=f"fav_{market}"):
+            if cols[i].button(star, key=f"star_{market}"):
                 if market in st.session_state.favorites:
                     st.session_state.favorites.remove(market)
                 else:
                     st.session_state.favorites.append(market)
 
-        selected = st.session_state.get("selected_market", CATEGORIES[category][0])
-        st.markdown(f"### Selected: {selected}")
+        selected = st.session_state.selected_market
+        st.markdown(f"### Selected Market: {selected}")
 
-        if st.button("🔍 Generate Signal"):
+        if st.button("🔄 Refresh Signal"):
             data = get_live_data(MARKET_SYMBOLS[selected])
             if data:
                 signal = generate_signal(data)
                 exch, sym = MARKET_SYMBOLS[selected]
                 chart_url = f"https://s.tradingview.com/widgetembed/?symbol={exch}:{sym}&interval=1&theme=dark"
-                st.components.v1.iframe(chart_url, height=400)
+                iframe(chart_url, height=400)
 
                 st.subheader("📊 Market Overview")
                 st.markdown(f"- **Trend**: {data['trend']}")
@@ -159,8 +165,8 @@ if STREAMLIT_AVAILABLE:
                     st.markdown(f"**Stop Loss:** {signal['stop_loss']}")
                     st.markdown(f"**Take Profit (1:3):** {signal['take_profit']}")
                 if signal['reasons']:
-                    st.markdown(f"**Why this signal?** {' | '.join(signal['reasons'])}")
-                st.caption(f"Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                    st.markdown(f"**Reasons:** {' | '.join(signal['reasons'])}")
+                st.caption(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
                 st.session_state.history.append({
                     "market": selected,
@@ -168,7 +174,7 @@ if STREAMLIT_AVAILABLE:
                     "time": datetime.now().strftime('%H:%M:%S')
                 })
             else:
-                st.error("❌ Failed to fetch real-time data. Try again.")
+                st.error("❌ Failed to fetch data.")
     if __name__ == "__main__":
         run_ui()
 else:
