@@ -1,12 +1,17 @@
 import sys
-import time
 from datetime import datetime
-import streamlit as st
-from streamlit.components.v1 import iframe
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options
-from tvDatafeed import TvDatafeed, Interval
+
+try:
+    import streamlit as st
+    from streamlit.components.v1 import iframe
+    STREAMLIT_AVAILABLE = True
+except ImportError:
+    STREAMLIT_AVAILABLE = False
+
+try:
+    from tvDatafeed import TvDatafeed, Interval
+except ImportError:
+    sys.exit("Please install tvDatafeed: pip install git+https://github.com/rongardF/tvdatafeed.git")
 
 tv = TvDatafeed()
 
@@ -58,8 +63,8 @@ def get_live_data(symbol_info):
 
 def generate_signal(data, account_balance):
     entry = data["price"]
-    risk_amount = account_balance * 0.01
-    pip_value = 10
+    risk_amount = account_balance * 0.01  # 1% of account balance
+    pip_value = 10  # simplified assumption for value per pip or unit
     pip_risk = risk_amount / pip_value
     sl, tp = None, None
     signal = "WAIT"
@@ -89,97 +94,81 @@ def generate_signal(data, account_balance):
         "reward_amount": round(risk_amount * 3, 2)
     }
 
-def execute_trade_exness(signal_type, symbol, email, password):
-    try:
-        options = Options()
-        options.add_argument("--start-maximized")
-        driver = webdriver.Chrome(options=options)
-        driver.get("https://www.exness.com")
-        time.sleep(3)
+if STREAMLIT_AVAILABLE:
+    def run_ui():
+        st.set_page_config(layout="wide", page_title="TradingView Risk Bot")
+        st.title("📊 TradingView-Style Risk Bot")
 
-        driver.find_element(By.LINK_TEXT, "Sign in").click()
-        time.sleep(3)
-        driver.find_element(By.NAME, "email").send_keys(email)
-        driver.find_element(By.NAME, "password").send_keys(password)
-        driver.find_element(By.CSS_SELECTOR, "button[type='submit']").click()
-        time.sleep(5)
+        st.markdown("""
+            <style>
+            .stApp { background-color: #0e1117; color: white; font-family: 'Segoe UI', sans-serif; }
+            .stSidebar { background-color: #1c1f26; }
+            </style>
+        """, unsafe_allow_html=True)
 
-        driver.get("https://trade.exness.com/")
-        time.sleep(8)
+        if "favorites" not in st.session_state:
+            st.session_state.favorites = []
+        if "selected_market" not in st.session_state:
+            st.session_state.selected_market = "EUR/USD"
 
-        search = driver.find_element(By.XPATH, "//input[@placeholder='Search']")
-        search.send_keys(symbol)
-        time.sleep(3)
+        st.sidebar.header("⭐ Favorites")
+        for fav in st.session_state.favorites:
+            exch, sym = MARKET_SYMBOLS[fav]
+            df = tv.get_hist(sym, exch, Interval.in_1_minute, n_bars=1)
+            if df is not None and not df.empty:
+                price = df.iloc[-1]["close"]
+                st.sidebar.markdown(f"{fav}: {round(price, 5)}")
 
-        driver.find_element(By.XPATH, f"//div[contains(text(), '{symbol}')]").click()
-        time.sleep(3)
+        st.sidebar.markdown("---")
+        st.sidebar.caption("Select category and star your favorites")
 
-        if signal_type == "BUY":
-            driver.find_element(By.XPATH, "//button[contains(text(),'Buy')]").click()
-        elif signal_type == "SELL":
-            driver.find_element(By.XPATH, "//button[contains(text(),'Sell')]").click()
+        category = st.sidebar.selectbox("Market Category", list(CATEGORIES.keys()))
+        for market in CATEGORIES[category]:
+            col1, col2 = st.columns([8, 1])
+            if col1.button(market):
+                st.session_state.selected_market = market
+            if col2.button("⭐" if market in st.session_state.favorites else "☆", key=f"fav_{market}"):
+                if market in st.session_state.favorites:
+                    st.session_state.favorites.remove(market)
+                else:
+                    st.session_state.favorites.append(market)
 
-        time.sleep(5)
-        print(f"✅ {signal_type} trade executed.")
-    except Exception as e:
-        print("❌ Trade failed:", e)
-    finally:
-        driver.quit()
+        st.markdown("---")
+        st.subheader(f"📈 {st.session_state.selected_market} Chart")
+        exch, sym = MARKET_SYMBOLS[st.session_state.selected_market]
+        iframe(f"https://s.tradingview.com/widgetembed/?symbol={exch}:{sym}&interval=1&theme=dark", height=400)
 
-def run_ui():
-    st.set_page_config(layout="wide", page_title="Exness AutoBot")
-    st.title("📈 Exness Trading Bot with Auto-Trade")
+        st.markdown("---")
+        account_balance = st.number_input("💰 Enter your account balance ($)", min_value=10, value=1000)
 
-    if "favorites" not in st.session_state:
-        st.session_state.favorites = []
-    if "selected_market" not in st.session_state:
-        st.session_state.selected_market = "EUR/USD"
-    if "auto_trade" not in st.session_state:
-        st.session_state.auto_trade = False
+        if st.button("🔄 Refresh Signal"):
+            data = get_live_data((exch, sym))
+            if data:
+                signal = generate_signal(data, account_balance)
 
-    category = st.sidebar.selectbox("Category", list(CATEGORIES.keys()))
-    for market in CATEGORIES[category]:
-        col1, col2 = st.columns([8, 1])
-        if col1.button(market):
-            st.session_state.selected_market = market
-        if col2.button("⭐" if market in st.session_state.favorites else "☆", key=market):
-            if market in st.session_state.favorites:
-                st.session_state.favorites.remove(market)
+                st.subheader("📌 Market Snapshot")
+                st.markdown(f"- Trend: **{data['trend']}**")
+                st.markdown(f"- Momentum: **{data['momentum']}**")
+                st.markdown(f"- Volatility: **{data['volatility']}**")
+                st.markdown(f"- Support: **{data['support']}**")
+                st.markdown(f"- Resistance: **{data['resistance']}**")
+
+                st.subheader("✅ Signal Result")
+                st.markdown(f"- Signal: `{signal['signal']}`")
+                st.markdown(f"- Confidence: **{signal['confidence']}%**")
+                st.progress(signal['confidence'])
+
+                st.markdown(f"- Entry Price: **{signal['entry']}**")
+                st.markdown(f"- Stop Loss: **{signal['stop_loss']}**  |  Take Profit: **{signal['take_profit']}**")
+                st.markdown(f"- 💸 Risk: `${signal['risk_amount']}` | 🟢 Reward: `${signal['reward_amount']}`")
+
+                if signal['reasons']:
+                    st.markdown(f"**Reason:** {' | '.join(signal['reasons'])}")
+                st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             else:
-                st.session_state.favorites.append(market)
+                st.error("❌ Failed to fetch live data.")
 
-    st.sidebar.markdown("---")
-    st.sidebar.checkbox("✅ Enable Auto-Trade", key="auto_trade")
-    email = st.sidebar.text_input("📧 Exness Email", type="default")
-    password = st.sidebar.text_input("🔐 Exness Password", type="password")
-    account_balance = st.sidebar.number_input("💰 Account Balance ($)", min_value=10, value=1000)
-
-    st.subheader(f"📉 Chart - {st.session_state.selected_market}")
-    exch, sym = MARKET_SYMBOLS[st.session_state.selected_market]
-    iframe(f"https://s.tradingview.com/widgetembed/?symbol={exch}:{sym}&interval=1&theme=dark", height=400)
-
-    if st.button("🔄 Refresh Signal"):
-        data = get_live_data((exch, sym))
-        if data:
-            signal = generate_signal(data, account_balance)
-
-            st.subheader("📊 Market Info")
-            st.markdown(f"- Trend: **{data['trend']}**, Momentum: **{data['momentum']}**")
-            st.markdown(f"- Volatility: **{data['volatility']}**, Support: **{data['support']}**, Resistance: **{data['resistance']}**")
-
-            st.subheader("✅ Signal")
-            st.markdown(f"- Signal: `{signal['signal']}` | Confidence: **{signal['confidence']}%**")
-            st.progress(signal['confidence'])
-            st.markdown(f"- Entry: `{signal['entry']}`, SL: `{signal['stop_loss']}`, TP: `{signal['take_profit']}`")
-            st.markdown(f"- 💸 Risk: `${signal['risk_amount']}`, Reward: `${signal['reward_amount']}`")
-            if signal['reasons']:
-                st.markdown(f"**Reasons:** {', '.join(signal['reasons'])}")
-            st.caption(f"Updated at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
-            if st.session_state.auto_trade and signal['signal'] in ["BUY", "SELL"]:
-                execute_trade_exness(signal['signal'], sym, email, password)
-        else:
-            st.error("Failed to fetch data.")
-
-if __name__ == "__main__":
-    run_ui()
+    if __name__ == "__main__":
+        run_ui()
+else:
+    print("Streamlit not installed.")
