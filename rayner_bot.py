@@ -14,6 +14,7 @@ except ImportError:
 
 tv = TvDatafeed()
 
+# Market mapping
 MARKET_SYMBOLS = {
     "NIFTY 50": ("NSE", "NIFTY"),
     "BANKNIFTY": ("NSE", "BANKNIFTY"),
@@ -42,6 +43,7 @@ CATEGORIES = {
     "Crypto": ["Bitcoin", "Ethereum", "Solana", "XRP", "Dogecoin"],
 }
 
+# Fetch live data
 def get_live_data(symbol_info):
     exchange, symbol = symbol_info
     df = tv.get_hist(symbol=symbol, exchange=exchange, interval=Interval.in_1_minute, n_bars=20)
@@ -67,6 +69,7 @@ def get_live_data(symbol_info):
         "signal_strength": min(100, max(10, volatility)),
     }
 
+# Signal logic
 def generate_signal(data):
     entry = data["price"]
     risk = 0.0015
@@ -99,10 +102,26 @@ def generate_signal(data):
         "reasons": reasons,
     }
 
+# UI
 if STREAMLIT_AVAILABLE:
     def run_ui():
-        st.set_page_config(layout="wide", page_title="Rayner Pro Bot")
-        st.markdown("<style>body { background-color: #0e1117; color: #fff; } .stApp { padding: 0rem }</style>", unsafe_allow_html=True)
+        st.set_page_config(layout="wide", page_title="TradingView Style Bot")
+        # Dark background image
+        st.markdown("""
+            <style>
+            .stApp {
+                background-image: url("https://images.unsplash.com/photo-1611223433466-b19eec98ad8b?auto=format&fit=crop&w=1500&q=80");
+                background-size: cover;
+                background-repeat: no-repeat;
+                background-attachment: fixed;
+            }
+            .block-container {
+                background-color: rgba(0,0,0,0.75);
+                border-radius: 10px;
+                padding: 2rem;
+            }
+            </style>
+        """, unsafe_allow_html=True)
 
         if "favorites" not in st.session_state:
             st.session_state.favorites = []
@@ -111,21 +130,21 @@ if STREAMLIT_AVAILABLE:
         if "selected_market" not in st.session_state:
             st.session_state.selected_market = "EUR/USD"
 
-        st.sidebar.title("⭐ Favorites Watchlist")
+        st.sidebar.title("⭐ Favorite Watchlist")
         for fav in st.session_state.favorites:
             exch, sym = MARKET_SYMBOLS[fav]
             df = tv.get_hist(sym, exch, Interval.in_1_minute, n_bars=1)
             if df is not None and not df.empty:
                 price = df.iloc[-1]["close"]
-                st.sidebar.markdown(f"<div style='font-size: 14px; padding-bottom: 8px;'><b>{fav}</b>: {round(price, 5)}</div>", unsafe_allow_html=True)
+                st.sidebar.markdown(f"<b>{fav}</b>: {round(price, 5)}", unsafe_allow_html=True)
 
         st.sidebar.markdown("---")
-        st.sidebar.subheader("📜 Signal History")
+        st.sidebar.subheader("📜 Recent Signals")
         for h in reversed(st.session_state.history[-5:]):
             st.sidebar.markdown(f"<div style='color: gray;'>{h['market']} → <b>{h['signal']}</b> at {h['time']}</div>", unsafe_allow_html=True)
 
-        st.markdown("## Market Selection", unsafe_allow_html=True)
-        category = st.radio("Select Category", list(CATEGORIES.keys()), horizontal=True)
+        st.markdown("### 🔍 Select Category", unsafe_allow_html=True)
+        category = st.radio("Market Type", list(CATEGORIES.keys()), horizontal=True)
 
         cols = st.columns(len(CATEGORIES[category]))
         for i, market in enumerate(CATEGORIES[category]):
@@ -139,7 +158,7 @@ if STREAMLIT_AVAILABLE:
                     st.session_state.favorites.append(market)
 
         selected = st.session_state.selected_market
-        st.markdown(f"### Selected: `{selected}`")
+        st.markdown(f"### 📍 Selected: `{selected}`")
 
         if st.button("🔄 Refresh Signal"):
             data = get_live_data(MARKET_SYMBOLS[selected])
@@ -148,14 +167,14 @@ if STREAMLIT_AVAILABLE:
                 exch, sym = MARKET_SYMBOLS[selected]
                 iframe(f"https://s.tradingview.com/widgetembed/?symbol={exch}:{sym}&interval=1&theme=dark", height=400)
 
-                st.markdown("### Market Overview")
+                st.subheader("📊 Market Snapshot")
                 st.markdown(f"- **Trend:** {data['trend']}")
                 st.markdown(f"- **Momentum:** {data['momentum']}")
                 st.markdown(f"- **Volatility:** {data['volatility']}")
                 st.markdown(f"- **Support:** {data['support']}")
                 st.markdown(f"- **Resistance:** {data['resistance']}")
 
-                st.markdown("### ✅ Signal")
+                st.subheader("✅ Signal Output")
                 st.markdown(f"**Signal:** `{signal['signal']}`")
                 st.markdown(f"**Confidence:** {signal['confidence']}%")
                 st.progress(signal['confidence'])
@@ -177,4 +196,4 @@ if STREAMLIT_AVAILABLE:
     if __name__ == "__main__":
         run_ui()
 else:
-    print("Streamlit not available.")
+    print("Streamlit not installed.")
