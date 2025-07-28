@@ -1,151 +1,185 @@
-# rayner_bot.py
-
 import sys
-import datetime
-
-try:
-    import streamlit as st
-    STREAMLIT_AVAILABLE = True
-except ImportError:
-    STREAMLIT_AVAILABLE = False
-
-try:
-    from tvDatafeed import TvDatafeed, Interval
-except ImportError:
-    sys.exit("tvDatafeed is not installed. Please install it using 'pip install tvDatafeed'")
+import time
+from datetime import datetime
+import streamlit as st
+from streamlit.components.v1 import iframe
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from tvDatafeed import TvDatafeed, Interval
 
 tv = TvDatafeed()
 
-# Market List (Includes Forex, Crypto, Commodities, Indices)
 MARKET_SYMBOLS = {
     "EUR/USD": ("OANDA", "EURUSD"),
     "GBP/JPY": ("OANDA", "GBPJPY"),
     "USD/JPY": ("OANDA", "USDJPY"),
     "AUD/USD": ("OANDA", "AUDUSD"),
-    "XAU/USD (Gold)": ("OANDA", "XAUUSD"),
+    "XAU/USD": ("OANDA", "XAUUSD"),
     "BTC/USD": ("BINANCE", "BTCUSDT"),
     "ETH/USD": ("BINANCE", "ETHUSDT"),
-    "USOIL": ("TVC", "USOIL"),
-    "NATGAS": ("TVC", "NATGASUSD"),
+    "Gold": ("OANDA", "XAUUSD"),
+    "Silver": ("OANDA", "XAGUSD"),
+    "Oil WTI": ("OANDA", "WTICOUSD"),
     "NIFTY 50": ("NSE", "NIFTY"),
-    "SENSEX": ("BSE", "SENSEX"),
-    "S&P 500": ("SP", "SPX"),
+    "BANKNIFTY": ("NSE", "BANKNIFTY"),
 }
 
-FAVORITES = ["NIFTY 50", "EUR/USD", "XAU/USD (Gold)"]
+CATEGORIES = {
+    "Forex": ["EUR/USD", "GBP/JPY", "USD/JPY", "AUD/USD", "XAU/USD"],
+    "Crypto": ["BTC/USD", "ETH/USD"],
+    "Commodities": ["Gold", "Silver", "Oil WTI"],
+    "Indices": ["NIFTY 50", "BANKNIFTY"]
+}
 
 def get_live_data(symbol_info):
     exchange, symbol = symbol_info
     df = tv.get_hist(symbol=symbol, exchange=exchange, interval=Interval.in_1_minute, n_bars=20)
-
     if df is None or df.empty:
         return None
-
-    last_candle = df.iloc[-1]
-    prev_candle = df.iloc[-2]
-
-    price = round(last_candle['close'], 5)
-    previous_price = round(prev_candle['close'], 5)
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    price = round(last['close'], 5)
+    prev_price = round(prev['close'], 5)
     support = round(df['low'].min(), 5)
     resistance = round(df['high'].max(), 5)
-
-    momentum = "strong" if abs(price - previous_price) > 0.0008 else "weak"
+    momentum = "strong" if abs(price - prev_price) > 0.0008 else "weak"
     volatility = round(df['high'].std() * 10000)
     trend = "uptrend" if price > df['close'].rolling(5).mean().iloc[-1] else "downtrend"
-
     return {
         "price": price,
-        "previous_price": previous_price,
         "trend": trend,
         "support": support,
         "resistance": resistance,
-        "volatility": volatility,
         "momentum": momentum,
-        "signal_strength": min(100, max(10, volatility)),
+        "volatility": volatility,
+        "signal_strength": min(100, max(10, volatility))
     }
 
-def generate_signal(data):
+def generate_signal(data, account_balance):
+    entry = data["price"]
+    risk_amount = account_balance * 0.01
+    pip_value = 10
+    pip_risk = risk_amount / pip_value
+    sl, tp = None, None
+    signal = "WAIT"
     reasons = []
-    entry_price = data["price"]
-    sl = None
-    tp = None
 
-    if data["trend"] == "uptrend" and entry_price > data["support"]:
+    if data["trend"] == "uptrend" and entry > data["support"]:
         if data["momentum"] == "strong" and data["volatility"] > 50:
-            sl = entry_price - 0.0015
-            tp = entry_price + (entry_price - sl) * 3
-            reasons.append("Breakout confirmation in uptrend")
+            sl = entry - pip_risk
+            tp = entry + (entry - sl) * 3
             signal = "BUY"
-        else:
-            signal = "WAIT"
-    elif data["trend"] == "downtrend" and entry_price < data["resistance"]:
+            reasons.append("Strong uptrend breakout")
+    elif data["trend"] == "downtrend" and entry < data["resistance"]:
         if data["momentum"] == "strong" and data["volatility"] > 50:
-            sl = entry_price + 0.0015
-            tp = entry_price - (sl - entry_price) * 3
-            reasons.append("Breakout confirmation in downtrend")
+            sl = entry + pip_risk
+            tp = entry - (sl - entry) * 3
             signal = "SELL"
-        else:
-            signal = "WAIT"
-    else:
-        signal = "WAIT"
+            reasons.append("Strong downtrend breakout")
 
     return {
         "signal": signal,
-        "entry": entry_price,
+        "entry": round(entry, 5),
         "stop_loss": round(sl, 5) if sl else None,
         "take_profit": round(tp, 5) if tp else None,
         "confidence": data["signal_strength"],
         "reasons": reasons,
+        "risk_amount": round(risk_amount, 2),
+        "reward_amount": round(risk_amount * 3, 2)
     }
 
-if STREAMLIT_AVAILABLE:
-    def run_ui():
-        st.set_page_config(layout="wide", page_title="TradingView Style Bot")
-        st.markdown("""
-            <style>
-                .block-container {
-                    padding: 1rem 2rem;
-                    background-image: url("https://images.unsplash.com/photo-1616857593881-03c2d3ad88f4?ixlib=rb-4.0.3&auto=format&fit=crop&w=1350&q=80");
-                    background-size: cover;
-                    color: white;
-                }
-                .stButton>button {
-                    width: 100%;
-                }
-            </style>
-        """, unsafe_allow_html=True)
+def execute_trade_exness(signal_type, symbol, email, password):
+    try:
+        options = Options()
+        options.add_argument("--start-maximized")
+        driver = webdriver.Chrome(options=options)
+        driver.get("https://www.exness.com")
+        time.sleep(3)
 
-        st.title("📈 Rayner Teo Style Bot (TradingView Look)")
+        driver.find_element(By.LINK_TEXT, "Sign in").click()
+        time.sleep(3)
+        driver.find_element(By.NAME, "email").send_keys(email)
+        driver.find_element(By.NAME, "password").send_keys(password)
+        driver.find_element(By.CSS_SELECTOR, "button[type='submit']").click()
+        time.sleep(5)
 
-        col1, col2 = st.columns([1, 2])
+        driver.get("https://trade.exness.com/")
+        time.sleep(8)
 
-        with col1:
-            st.subheader("🌟 Favorite Markets")
-            for market in FAVORITES:
-                data = get_live_data(MARKET_SYMBOLS[market])
-                if data:
-                    signal = generate_signal(data)
-                    with st.expander(f"🔸 {market} ({signal['signal']})"):
-                        st.metric("Price", data["price"])
-                        st.metric("Trend", data["trend"])
-                        st.metric("Momentum", data["momentum"])
-                        st.metric("Volatility", f"{data['volatility']}%")
+        search = driver.find_element(By.XPATH, "//input[@placeholder='Search']")
+        search.send_keys(symbol)
+        time.sleep(3)
 
-        with col2:
-            st.subheader("📊 Select Market to Analyze")
-            market = st.selectbox("Choose market", list(MARKET_SYMBOLS.keys()))
-            data = get_live_data(MARKET_SYMBOLS[market])
-            if data:
-                signal = generate_signal(data)
-                st.components.v1.iframe(f"https://s.tradingview.com/widgetembed/?frameElementId=tradingview_{market}&symbol={MARKET_SYMBOLS[market][0]}%3A{MARKET_SYMBOLS[market][1]}&interval=1&theme=dark&style=1", height=400)
-                st.write("### Signal Details")
-                st.success(f"📌 Signal: {signal['signal']}")
-                st.info(f"Confidence: {signal['confidence']}%")
-                st.markdown(f"**Entry:** {signal['entry']}")
-                if signal['stop_loss'] and signal['take_profit']:
-                    st.markdown(f"**SL:** {signal['stop_loss']} | **TP:** {signal['take_profit']}")
+        driver.find_element(By.XPATH, f"//div[contains(text(), '{symbol}')]").click()
+        time.sleep(3)
 
-    if __name__ == "__main__":
-        run_ui()
-else:
-    print("Streamlit not available. Install it using pip install streamlit")
+        if signal_type == "BUY":
+            driver.find_element(By.XPATH, "//button[contains(text(),'Buy')]").click()
+        elif signal_type == "SELL":
+            driver.find_element(By.XPATH, "//button[contains(text(),'Sell')]").click()
+
+        time.sleep(5)
+        print(f"✅ {signal_type} trade executed.")
+    except Exception as e:
+        print("❌ Trade failed:", e)
+    finally:
+        driver.quit()
+
+def run_ui():
+    st.set_page_config(layout="wide", page_title="Exness AutoBot")
+    st.title("📈 Exness Trading Bot with Auto-Trade")
+
+    if "favorites" not in st.session_state:
+        st.session_state.favorites = []
+    if "selected_market" not in st.session_state:
+        st.session_state.selected_market = "EUR/USD"
+    if "auto_trade" not in st.session_state:
+        st.session_state.auto_trade = False
+
+    category = st.sidebar.selectbox("Category", list(CATEGORIES.keys()))
+    for market in CATEGORIES[category]:
+        col1, col2 = st.columns([8, 1])
+        if col1.button(market):
+            st.session_state.selected_market = market
+        if col2.button("⭐" if market in st.session_state.favorites else "☆", key=market):
+            if market in st.session_state.favorites:
+                st.session_state.favorites.remove(market)
+            else:
+                st.session_state.favorites.append(market)
+
+    st.sidebar.markdown("---")
+    st.sidebar.checkbox("✅ Enable Auto-Trade", key="auto_trade")
+    email = st.sidebar.text_input("📧 Exness Email", type="default")
+    password = st.sidebar.text_input("🔐 Exness Password", type="password")
+    account_balance = st.sidebar.number_input("💰 Account Balance ($)", min_value=10, value=1000)
+
+    st.subheader(f"📉 Chart - {st.session_state.selected_market}")
+    exch, sym = MARKET_SYMBOLS[st.session_state.selected_market]
+    iframe(f"https://s.tradingview.com/widgetembed/?symbol={exch}:{sym}&interval=1&theme=dark", height=400)
+
+    if st.button("🔄 Refresh Signal"):
+        data = get_live_data((exch, sym))
+        if data:
+            signal = generate_signal(data, account_balance)
+
+            st.subheader("📊 Market Info")
+            st.markdown(f"- Trend: **{data['trend']}**, Momentum: **{data['momentum']}**")
+            st.markdown(f"- Volatility: **{data['volatility']}**, Support: **{data['support']}**, Resistance: **{data['resistance']}**")
+
+            st.subheader("✅ Signal")
+            st.markdown(f"- Signal: `{signal['signal']}` | Confidence: **{signal['confidence']}%**")
+            st.progress(signal['confidence'])
+            st.markdown(f"- Entry: `{signal['entry']}`, SL: `{signal['stop_loss']}`, TP: `{signal['take_profit']}`")
+            st.markdown(f"- 💸 Risk: `${signal['risk_amount']}`, Reward: `${signal['reward_amount']}`")
+            if signal['reasons']:
+                st.markdown(f"**Reasons:** {', '.join(signal['reasons'])}")
+            st.caption(f"Updated at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+            if st.session_state.auto_trade and signal['signal'] in ["BUY", "SELL"]:
+                execute_trade_exness(signal['signal'], sym, email, password)
+        else:
+            st.error("Failed to fetch data.")
+
+if __name__ == "__main__":
+    run_ui()
