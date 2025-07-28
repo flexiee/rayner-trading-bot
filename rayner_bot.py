@@ -1,5 +1,6 @@
 import sys
 from datetime import datetime
+import pytz  # ✅ Added
 
 try:
     import streamlit as st
@@ -37,6 +38,25 @@ CATEGORIES = {
     "Indices": ["NIFTY 50", "BANKNIFTY"]
 }
 
+# 🔥 High-Movement Session Detector
+SESSIONS = {
+    "London (Forex)": {"start": 8, "end": 17, "timezone": "Europe/London"},
+    "New York (US Markets)": {"start": 8, "end": 17, "timezone": "America/New_York"},
+    "Tokyo (Asia)": {"start": 9, "end": 16, "timezone": "Asia/Tokyo"},
+    "Sydney (Pacific)": {"start": 9, "end": 17, "timezone": "Australia/Sydney"},
+    "Crypto Peak (UTC)": {"start": 12, "end": 21, "timezone": "UTC"},
+}
+
+def get_active_sessions():
+    now_utc = datetime.utcnow().replace(tzinfo=pytz.utc)
+    active = []
+    for name, info in SESSIONS.items():
+        tz = pytz.timezone(info["timezone"])
+        local = now_utc.astimezone(tz)
+        if info["start"] <= local.hour < info["end"]:
+            active.append(name)
+    return active
+
 def get_live_data(symbol_info):
     exchange, symbol = symbol_info
     df = tv.get_hist(symbol=symbol, exchange=exchange, interval=Interval.in_1_minute, n_bars=20)
@@ -63,8 +83,8 @@ def get_live_data(symbol_info):
 
 def generate_signal(data, account_balance):
     entry = data["price"]
-    risk_amount = account_balance * 0.01  # 1% of account balance
-    pip_value = 10  # simplified assumption for value per pip or unit
+    risk_amount = account_balance * 0.01
+    pip_value = 10
     pip_risk = risk_amount / pip_value
     sl, tp = None, None
     signal = "WAIT"
@@ -98,6 +118,15 @@ if STREAMLIT_AVAILABLE:
     def run_ui():
         st.set_page_config(layout="wide", page_title="TradingView Risk Bot")
         st.title("📊 TradingView-Style Risk Bot")
+
+        # 🔥 Display active sessions
+        active_sessions = get_active_sessions()
+        if active_sessions:
+            st.markdown("### 🌍 High-Movement Markets Now")
+            for s in active_sessions:
+                st.markdown(f"- ✅ **{s}**")
+        else:
+            st.markdown("### 🕒 No major sessions active right now.")
 
         st.markdown("""
             <style>
