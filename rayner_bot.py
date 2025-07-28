@@ -1,6 +1,6 @@
 import sys
 from datetime import datetime
-import pytz  # ✅ Added
+import pytz
 
 try:
     import streamlit as st
@@ -38,10 +38,10 @@ CATEGORIES = {
     "Indices": ["NIFTY 50", "BANKNIFTY"]
 }
 
-# 🔥 High-Movement Session Detector
+# World Market Sessions
 SESSIONS = {
     "London (Forex)": {"start": 8, "end": 17, "timezone": "Europe/London"},
-    "New York (US Markets)": {"start": 8, "end": 17, "timezone": "America/New_York"},
+    "New York (US)": {"start": 8, "end": 17, "timezone": "America/New_York"},
     "Tokyo (Asia)": {"start": 9, "end": 16, "timezone": "Asia/Tokyo"},
     "Sydney (Pacific)": {"start": 9, "end": 17, "timezone": "Australia/Sydney"},
     "Crypto Peak (UTC)": {"start": 12, "end": 21, "timezone": "UTC"},
@@ -56,6 +56,20 @@ def get_active_sessions():
         if info["start"] <= local.hour < info["end"]:
             active.append(name)
     return active
+
+def get_top_moving_markets():
+    market_vols = []
+    for name, (exchange, symbol) in MARKET_SYMBOLS.items():
+        try:
+            df = tv.get_hist(symbol, exchange, interval=Interval.in_1_minute, n_bars=20)
+            if df is not None and not df.empty:
+                std_dev = df['high'].std()
+                volatility = round(std_dev * 10000, 2)
+                market_vols.append((name, volatility))
+        except Exception:
+            continue
+    sorted_markets = sorted(market_vols, key=lambda x: x[1], reverse=True)
+    return sorted_markets[:3]
 
 def get_live_data(symbol_info):
     exchange, symbol = symbol_info
@@ -119,14 +133,19 @@ if STREAMLIT_AVAILABLE:
         st.set_page_config(layout="wide", page_title="TradingView Risk Bot")
         st.title("📊 TradingView-Style Risk Bot")
 
-        # 🔥 Display active sessions
+        # High movement sessions
         active_sessions = get_active_sessions()
         if active_sessions:
-            st.markdown("### 🌍 High-Movement Markets Now")
+            st.markdown("### 🌍 Active Market Sessions Now")
             for s in active_sessions:
                 st.markdown(f"- ✅ **{s}**")
-        else:
-            st.markdown("### 🕒 No major sessions active right now.")
+
+        # Top market pairs with highest volatility
+        movers = get_top_moving_markets()
+        if movers:
+            st.markdown("### 🔥 Top Moving Markets Now")
+            for pair, vol in movers:
+                st.markdown(f"- 🔹 {pair}: {vol} volatility")
 
         st.markdown("""
             <style>
