@@ -1,174 +1,152 @@
-import sys
-from datetime import datetime
-
-try:
-    import streamlit as st
-    from streamlit.components.v1 import iframe
-    STREAMLIT_AVAILABLE = True
-except ImportError:
-    STREAMLIT_AVAILABLE = False
-
-try:
-    from tvDatafeed import TvDatafeed, Interval
-except ImportError:
-    sys.exit("Please install tvDatafeed: pip install git+https://github.com/rongardF/tvdatafeed.git")
+import streamlit as st
+from tvDatafeed import TvDatafeed, Interval
+import pandas as pd
+import datetime
 
 tv = TvDatafeed()
 
+# Predefined market list
 MARKET_SYMBOLS = {
     "EUR/USD": ("OANDA", "EURUSD"),
     "GBP/JPY": ("OANDA", "GBPJPY"),
     "USD/JPY": ("OANDA", "USDJPY"),
     "AUD/USD": ("OANDA", "AUDUSD"),
-    "XAU/USD": ("OANDA", "XAUUSD"),
+    "XAU/USD (Gold)": ("OANDA", "XAUUSD"),
     "BTC/USD": ("BINANCE", "BTCUSDT"),
     "ETH/USD": ("BINANCE", "ETHUSDT"),
-    "Gold": ("OANDA", "XAUUSD"),
-    "Silver": ("OANDA", "XAGUSD"),
-    "Oil WTI": ("OANDA", "WTICOUSD"),
+    "USOIL": ("TVC", "USOIL"),
+    "NATGAS": ("TVC", "NATGASUSD"),
     "NIFTY 50": ("NSE", "NIFTY"),
-    "BANKNIFTY": ("NSE", "BANKNIFTY"),
+    "SENSEX": ("BSE", "SENSEX"),
+    "S&P 500": ("SP", "SPX")
 }
 
-CATEGORIES = {
-    "Forex": ["EUR/USD", "GBP/JPY", "USD/JPY", "AUD/USD", "XAU/USD"],
-    "Crypto": ["BTC/USD", "ETH/USD"],
-    "Commodities": ["Gold", "Silver", "Oil WTI"],
-    "Indices": ["NIFTY 50", "BANKNIFTY"]
-}
+# Risk settings (adjust as needed)
+DEFAULT_RISK_PERCENT = 1  # 1% risk per trade
 
 def get_live_data(symbol_info):
     exchange, symbol = symbol_info
     df = tv.get_hist(symbol=symbol, exchange=exchange, interval=Interval.in_1_minute, n_bars=20)
     if df is None or df.empty:
         return None
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    price = round(last['close'], 5)
-    prev_price = round(prev['close'], 5)
+
+    last_candle = df.iloc[-1]
+    prev_candle = df.iloc[-2]
+
+    price = round(last_candle['close'], 5)
+    previous_price = round(prev_candle['close'], 5)
     support = round(df['low'].min(), 5)
     resistance = round(df['high'].max(), 5)
-    momentum = "strong" if abs(price - prev_price) > 0.0008 else "weak"
+    momentum = "strong" if abs(price - previous_price) > 0.0008 else "weak"
     volatility = round(df['high'].std() * 10000)
     trend = "uptrend" if price > df['close'].rolling(5).mean().iloc[-1] else "downtrend"
+
     return {
         "price": price,
+        "previous_price": previous_price,
         "trend": trend,
         "support": support,
         "resistance": resistance,
-        "momentum": momentum,
         "volatility": volatility,
-        "signal_strength": min(100, max(10, volatility))
+        "momentum": momentum,
+        "signal_strength": min(100, max(10, volatility)),
+        "df": df
     }
 
+def calculate_risk(account_balance, sl, entry_price):
+    risk_amount = account_balance * (DEFAULT_RISK_PERCENT / 100)
+    pip_risk = abs(entry_price - sl)
+    if pip_risk == 0:
+        return 0, 0
+    lot_size = round(risk_amount / pip_risk, 2)
+    return lot_size, round(risk_amount, 2)
+
 def generate_signal(data, account_balance):
-    entry = data["price"]
-    risk_amount = account_balance * 0.01  # 1% of account balance
-    pip_value = 10  # simplified assumption for value per pip or unit
-    pip_risk = risk_amount / pip_value
-    sl, tp = None, None
-    signal = "WAIT"
     reasons = []
+    entry = data["price"]
+    sl = None
+    tp = None
 
     if data["trend"] == "uptrend" and entry > data["support"]:
         if data["momentum"] == "strong" and data["volatility"] > 50:
-            sl = entry - pip_risk
+            sl = entry - 0.0015
             tp = entry + (entry - sl) * 3
             signal = "BUY"
-            reasons.append("Strong uptrend breakout")
+            reasons.append("Breakout confirmation in uptrend")
+        else:
+            signal = "WAIT"
     elif data["trend"] == "downtrend" and entry < data["resistance"]:
         if data["momentum"] == "strong" and data["volatility"] > 50:
-            sl = entry + pip_risk
+            sl = entry + 0.0015
             tp = entry - (sl - entry) * 3
             signal = "SELL"
-            reasons.append("Strong downtrend breakout")
+            reasons.append("Breakout confirmation in downtrend")
+        else:
+            signal = "WAIT"
+    else:
+        signal = "WAIT"
+
+    lot_size, risk_amount = calculate_risk(account_balance, sl, entry) if sl else (0, 0)
 
     return {
         "signal": signal,
-        "entry": round(entry, 5),
+        "entry": entry,
         "stop_loss": round(sl, 5) if sl else None,
         "take_profit": round(tp, 5) if tp else None,
         "confidence": data["signal_strength"],
-        "reasons": reasons,
-        "risk_amount": round(risk_amount, 2),
-        "reward_amount": round(risk_amount * 3, 2)
+        "lot_size": lot_size,
+        "risk_amount": risk_amount,
+        "reasons": reasons
     }
 
-if STREAMLIT_AVAILABLE:
-    def run_ui():
-        st.set_page_config(layout="wide", page_title="TradingView Risk Bot")
-        st.title("📊 TradingView-Style Risk Bot")
+# UI
+st.set_page_config(page_title="Trading Bot", layout="wide")
+st.markdown("""
+    <style>
+    .main {
+        background: url('https://images.unsplash.com/photo-1605902711622-cfb43c44367d') no-repeat center center fixed;
+        background-size: cover;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-        st.markdown("""
-            <style>
-            .stApp { background-color: #0e1117; color: white; font-family: 'Segoe UI', sans-serif; }
-            .stSidebar { background-color: #1c1f26; }
-            </style>
-        """, unsafe_allow_html=True)
+st.title("📈 Professional Trading Bot with Risk Management")
 
-        if "favorites" not in st.session_state:
-            st.session_state.favorites = []
-        if "selected_market" not in st.session_state:
-            st.session_state.selected_market = "EUR/USD"
+col1, col2 = st.columns([1, 3])
 
-        st.sidebar.header("⭐ Favorites")
-        for fav in st.session_state.favorites:
-            exch, sym = MARKET_SYMBOLS[fav]
-            df = tv.get_hist(sym, exch, Interval.in_1_minute, n_bars=1)
-            if df is not None and not df.empty:
-                price = df.iloc[-1]["close"]
-                st.sidebar.markdown(f"{fav}: {round(price, 5)}")
+with col1:
+    account_balance = st.number_input("💰 Enter Account Balance ($)", value=1000.0)
+    selected_market = st.selectbox("📊 Select Market", list(MARKET_SYMBOLS.keys()))
+    refresh = st.button("🔁 Refresh Signal")
 
-        st.sidebar.markdown("---")
-        st.sidebar.caption("Select category and star your favorites")
+with col2:
+    if refresh:
+        st.subheader(f"📍 Market Analysis: {selected_market}")
+        data = get_live_data(MARKET_SYMBOLS[selected_market])
+        if data:
+            signal_data = generate_signal(data, account_balance)
 
-        category = st.sidebar.selectbox("Market Category", list(CATEGORIES.keys()))
-        for market in CATEGORIES[category]:
-            col1, col2 = st.columns([8, 1])
-            if col1.button(market):
-                st.session_state.selected_market = market
-            if col2.button("⭐" if market in st.session_state.favorites else "☆", key=f"fav_{market}"):
-                if market in st.session_state.favorites:
-                    st.session_state.favorites.remove(market)
-                else:
-                    st.session_state.favorites.append(market)
+            symbol_code = MARKET_SYMBOLS[selected_market][1]
+            exchange = MARKET_SYMBOLS[selected_market][0]
+            iframe_url = f"https://s.tradingview.com/widgetembed/?frameElementId=tradingview_{symbol_code}&symbol={exchange}%3A{symbol_code}&interval=1&theme=dark&style=1"
+            st.components.v1.iframe(iframe_url, height=400)
 
-        st.markdown("---")
-        st.subheader(f"📈 {st.session_state.selected_market} Chart")
-        exch, sym = MARKET_SYMBOLS[st.session_state.selected_market]
-        iframe(f"https://s.tradingview.com/widgetembed/?symbol={exch}:{sym}&interval=1&theme=dark", height=400)
+            st.markdown(f"### 📢 Signal: {signal_data['signal']}")
+            st.markdown(f"**Confidence:** {signal_data['confidence']}%")
+            st.markdown(f"**Entry Price:** {signal_data['entry']}")
+            if signal_data["stop_loss"]:
+                st.markdown(f"**Stop Loss:** {signal_data['stop_loss']}")
+                st.markdown(f"**Take Profit (1:3):** {signal_data['take_profit']}")
+                st.markdown(f"**Lot Size:** {signal_data['lot_size']}")
+                st.markdown(f"**Risk Amount:** ${signal_data['risk_amount']}")
 
-        st.markdown("---")
-        account_balance = st.number_input("💰 Enter your account balance ($)", min_value=10, value=1000)
-
-        if st.button("🔄 Refresh Signal"):
-            data = get_live_data((exch, sym))
-            if data:
-                signal = generate_signal(data, account_balance)
-
-                st.subheader("📌 Market Snapshot")
-                st.markdown(f"- Trend: **{data['trend']}**")
-                st.markdown(f"- Momentum: **{data['momentum']}**")
-                st.markdown(f"- Volatility: **{data['volatility']}**")
-                st.markdown(f"- Support: **{data['support']}**")
-                st.markdown(f"- Resistance: **{data['resistance']}**")
-
-                st.subheader("✅ Signal Result")
-                st.markdown(f"- Signal: `{signal['signal']}`")
-                st.markdown(f"- Confidence: **{signal['confidence']}%**")
-                st.progress(signal['confidence'])
-
-                st.markdown(f"- Entry Price: **{signal['entry']}**")
-                st.markdown(f"- Stop Loss: **{signal['stop_loss']}**  |  Take Profit: **{signal['take_profit']}**")
-                st.markdown(f"- 💸 Risk: `${signal['risk_amount']}` | 🟢 Reward: `${signal['reward_amount']}`")
-
-                if signal['reasons']:
-                    st.markdown(f"**Reason:** {' | '.join(signal['reasons'])}")
-                st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            st.markdown("### Reason for Signal")
+            if signal_data["reasons"]:
+                for r in signal_data["reasons"]:
+                    st.markdown(f"- {r}")
             else:
-                st.error("❌ Failed to fetch live data.")
-
-    if __name__ == "__main__":
-        run_ui()
-else:
-    print("Streamlit not installed.")
+                st.info("⚠️ No strong signal identified.")
+        else:
+            st.error("⚠️ Unable to fetch live data.")
+    else:
+        st.info("🔄 Click 'Refresh Signal' to fetch and analyze live market data.")
