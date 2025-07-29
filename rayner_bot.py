@@ -4,7 +4,6 @@ from datetime import datetime
 try:
     import streamlit as st
     from streamlit.components.v1 import iframe
-    import ta
     STREAMLIT_AVAILABLE = True
 except ImportError:
     STREAMLIT_AVAILABLE = False
@@ -16,7 +15,6 @@ except ImportError:
 
 tv = TvDatafeed()
 
-# --- Market Symbols Map ---
 MARKET_SYMBOLS = {
     "EUR/USD": ("OANDA", "EURUSD"),
     "GBP/JPY": ("OANDA", "GBPJPY"),
@@ -29,124 +27,170 @@ MARKET_SYMBOLS = {
     "Silver": ("OANDA", "XAGUSD"),
     "Oil WTI": ("OANDA", "WTICOUSD"),
     "NIFTY 50": ("NSE", "NIFTY"),
-    "BANKNIFTY": ("NSE", "BANKNIFTY"),
+    "BANKNIFTY": ("NSE", "BANKNIFTY")
 }
 
-# --- Data Fetch and Indicator Logic ---
-def get_data(symbol_info, interval, bars=50):
+CATEGORIES = {
+    "Forex": ["EUR/USD", "GBP/JPY", "USD/JPY", "AUD/USD", "XAU/USD"],
+    "Crypto": ["BTC/USD", "ETH/USD"],
+    "Commodities": ["Gold", "Silver", "Oil WTI"],
+    "Indices": ["NIFTY 50", "BANKNIFTY"]
+}
+
+def get_live_data(symbol_info):
     exchange, symbol = symbol_info
-    df = tv.get_hist(symbol=symbol, exchange=exchange, interval=interval, n_bars=bars)
-    return df
-
-def add_indicators(df):
-    df["ema9"] = ta.trend.ema_indicator(df["close"], window=9)
-    df["ema21"] = ta.trend.ema_indicator(df["close"], window=21)
-    df["rsi"] = ta.momentum.rsi(df["close"], window=14)
-    return df
-
-def get_analysis(symbol_info):
-    df_1m = get_data(symbol_info, Interval.in_1_minute)
-    df_5m = get_data(symbol_info, Interval.in_5_minute)
-
-    if df_1m is None or df_5m is None or df_1m.empty or df_5m.empty:
+    df = tv.get_hist(symbol=symbol, exchange=exchange, interval=Interval.in_1_minute, n_bars=20)
+    if df is None or df.empty:
         return None
-
-    df_1m = add_indicators(df_1m)
-    df_5m = add_indicators(df_5m)
-
-    last_1m = df_1m.iloc[-1]
-    last_5m = df_5m.iloc[-1]
-
-    trend_1m = "uptrend" if last_1m["ema9"] > last_1m["ema21"] else "downtrend"
-    trend_5m = "uptrend" if last_5m["ema9"] > last_5m["ema21"] else "downtrend"
-
-    rsi_ok = last_1m["rsi"] > 50 if trend_1m == "uptrend" else last_1m["rsi"] < 50
-    ema_ok = (trend_1m == trend_5m)
-
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    price = round(last['close'], 5)
+    prev_price = round(prev['close'], 5)
+    support = round(df['low'].min(), 5)
+    resistance = round(df['high'].max(), 5)
+    momentum = "strong" if abs(price - prev_price) > 0.0008 else "weak"
+    volatility = round(df['high'].std() * 10000)
+    trend = "uptrend" if price > df['close'].rolling(5).mean().iloc[-1] else "downtrend"
     return {
-        "price": round(last_1m["close"], 5),
-        "trend": trend_1m,
-        "trend_match": trend_1m == trend_5m,
-        "rsi": round(last_1m["rsi"], 2),
-        "ema_fast": round(last_1m["ema9"], 5),
-        "ema_slow": round(last_1m["ema21"], 5),
-        "support": round(df_1m["low"].min(), 5),
-        "resistance": round(df_1m["high"].max(), 5),
-        "rsi_confirm": rsi_ok,
-        "ema_confirm": ema_ok
+        "price": price,
+        "trend": trend,
+        "support": support,
+        "resistance": resistance,
+        "momentum": momentum,
+        "volatility": volatility,
+        "signal_strength": min(100, max(10, volatility))
     }
 
-# --- Signal Generator ---
-def generate_signal(analysis, balance, risk_percent=1):
-    entry = analysis["price"]
-    sl = None
-    tp = None
+def generate_signal(data, account_balance):
+    entry = data["price"]
+    risk_amount = account_balance * 0.01
+    pip_value = 10
+    pip_risk = risk_amount / pip_value
+    sl, tp = None, None
     signal = "WAIT"
     reasons = []
 
-    if analysis["trend"] == "uptrend" and analysis["trend_match"] and analysis["rsi_confirm"] and analysis["ema_confirm"]:
-        sl = entry - 0.0015
-        tp = entry + (entry - sl) * 3
-        signal = "BUY"
-        reasons.append("Uptrend confirmed (EMA & RSI)")
+    if data["trend"] == "uptrend" and entry > data["support"]:
+        if data["momentum"] == "strong" and data["volatility"] > 50:
+            sl = entry - pip_risk
+            tp = entry + (entry - sl) * 3
+            signal = "BUY"
+            reasons.append("Strong uptrend breakout")
+    elif data["trend"] == "downtrend" and entry < data["resistance"]:
+        if data["momentum"] == "strong" and data["volatility"] > 50:
+            sl = entry + pip_risk
+            tp = entry - (sl - entry) * 3
+            signal = "SELL"
+            reasons.append("Strong downtrend breakout")
 
-    elif analysis["trend"] == "downtrend" and analysis["trend_match"] and analysis["rsi_confirm"] and analysis["ema_confirm"]:
-        sl = entry + 0.0015
-        tp = entry - (sl - entry) * 3
-        signal = "SELL"
-        reasons.append("Downtrend confirmed (EMA & RSI)")
-
-    risk_amt = balance * (risk_percent / 100)
-    pip_risk = abs(entry - sl) if sl else 0
-    lot_size = round(risk_amt / (pip_risk * 10), 2) if pip_risk else 0
+    lot_size = round(risk_amount / abs(entry - sl), 2) if sl else 0
 
     return {
         "signal": signal,
-        "entry": entry,
+        "entry": round(entry, 5),
         "stop_loss": round(sl, 5) if sl else None,
         "take_profit": round(tp, 5) if tp else None,
-        "risk": round(risk_amt, 2),
-        "reward": round(risk_amt * 3, 2),
-        "lot_size": lot_size,
-        "reasons": reasons
+        "confidence": data["signal_strength"],
+        "reasons": reasons,
+        "risk_amount": round(risk_amount, 2),
+        "reward_amount": round(risk_amount * 3, 2),
+        "lot_size": lot_size
     }
 
-# --- Streamlit Interface ---
+def get_high_movement_markets():
+    movement_scores = []
+    for market, (exch, sym) in MARKET_SYMBOLS.items():
+        try:
+            data = get_live_data((exch, sym))
+            if data:
+                movement_scores.append((market, data["volatility"]))
+        except:
+            continue
+    movement_scores.sort(key=lambda x: x[1], reverse=True)
+    return [m[0] for m in movement_scores[:3]]
+
 if STREAMLIT_AVAILABLE:
     def run_ui():
-        st.set_page_config(layout="wide", page_title="Smart Trading Bot")
-        st.title("📈 Smart Trading Bot (Multi-Timeframe, RSI, EMA, Risk Management)")
+        st.set_page_config(layout="wide", page_title="TradingView Risk Bot")
 
-        market = st.selectbox("📌 Select Market", list(MARKET_SYMBOLS.keys()))
+        st.markdown("""
+            <style>
+                .stApp {
+                    background-image: url('https://t4.ftcdn.net/jpg/03/22/51/58/360_F_322515847_Ii4Da6A2OlPQz5I18ikMG0R9wLoVWhdG.jpg');
+                    background-size: cover;
+                    color: white;
+                }
+            </style>
+        """, unsafe_allow_html=True)
+
+        if "favorites" not in st.session_state:
+            st.session_state.favorites = []
+        if "selected_market" not in st.session_state:
+            st.session_state.selected_market = "EUR/USD"
+
+        st.sidebar.title("⭐ Favorite Watchlist")
+        for fav in st.session_state.favorites:
+            exch, sym = MARKET_SYMBOLS[fav]
+            try:
+                df = tv.get_hist(sym, exch, Interval.in_1_minute, n_bars=1)
+                if df is not None and not df.empty:
+                    price = df.iloc[-1]["close"]
+                    st.sidebar.markdown(f"**{fav}**: {round(price, 5)}")
+            except:
+                pass
+
+        st.sidebar.markdown("---")
+        st.sidebar.caption("📈 Select market")
+
+        high_moves = get_high_movement_markets()
+        st.sidebar.markdown("🔥 High Movement:")
+        for mover in high_moves:
+            st.sidebar.markdown(f"- {mover}")
+
+        category = st.sidebar.selectbox("Category", list(CATEGORIES.keys()))
+        for market in CATEGORIES[category]:
+            col1, col2 = st.columns([8, 1])
+            if col1.button(market):
+                st.session_state.selected_market = market
+            if col2.button("⭐" if market in st.session_state.favorites else "☆", key=f"fav_{market}"):
+                if market in st.session_state.favorites:
+                    st.session_state.favorites.remove(market)
+                else:
+                    st.session_state.favorites.append(market)
+
+        market = st.session_state.selected_market
+        st.subheader(f"📊 {market} Live Chart")
         exch, sym = MARKET_SYMBOLS[market]
         iframe(f"https://s.tradingview.com/widgetembed/?symbol={exch}:{sym}&interval=1&theme=dark", height=400)
 
-        balance = st.number_input("💰 Account Balance ($)", min_value=100, value=1000)
-        risk_percent = st.slider("📉 Risk per Trade (%)", min_value=0.5, max_value=5.0, value=1.0, step=0.5)
+        st.markdown("---")
+        account_balance = st.number_input("💰 Account Balance", min_value=10, value=1000)
 
-        st.markdown("----")
+        if st.button("🔄 Refresh Signal"):
+            data = get_live_data((exch, sym))
+            if data:
+                signal = generate_signal(data, account_balance)
 
-        with st.spinner("⏳ Analyzing market..."):
-            analysis = get_analysis((exch, sym))
-            if analysis:
-                signal = generate_signal(analysis, balance, risk_percent)
+                st.subheader("Market Conditions")
+                st.markdown(f"- Trend: **{data['trend']}**")
+                st.markdown(f"- Momentum: **{data['momentum']}**")
+                st.markdown(f"- Volatility: **{data['volatility']}**")
+                st.markdown(f"- Support: **{data['support']}**, Resistance: **{data['resistance']}**")
 
-                st.subheader("📊 Technical Snapshot")
-                st.markdown(f"🔹 Trend (1m): **{analysis['trend']}**")
-                st.markdown(f"🔹 RSI: **{analysis['rsi']}**")
-                st.markdown(f"🔹 EMA 9: {analysis['ema_fast']} | EMA 21: {analysis['ema_slow']}")
-                st.markdown(f"🔹 Support: {analysis['support']} | Resistance: {analysis['resistance']}")
-                st.markdown(f"🔹 Timeframe Agreement (1m vs 5m): `{analysis['trend_match']}`")
+                st.subheader("📍 Signal")
+                st.markdown(f"- Signal: `{signal['signal']}`")
+                st.markdown(f"- Entry: `{signal['entry']}`")
+                st.markdown(f"- Stop Loss: `{signal['stop_loss']}`, Take Profit: `{signal['take_profit']}`")
+                st.markdown(f"- Confidence: **{signal['confidence']}%**")
+                st.progress(signal['confidence'])
 
-                st.subheader("✅ Signal")
-                st.markdown(f"📈 Signal: `{signal['signal']}`")
-                st.markdown(f"💲 Entry: {signal['entry']} | SL: {signal['stop_loss']} | TP: {signal['take_profit']}")
-                st.markdown(f"📉 Risk: ${signal['risk']} | 🟢 Reward: ${signal['reward']} | 📦 Lot Size: `{signal['lot_size']}`")
+                st.markdown(f"- 💸 Risk: `${signal['risk_amount']}` | 🟢 Reward: `${signal['reward_amount']}`")
+                st.markdown(f"- 📦 Suggested Lot Size: **{signal['lot_size']} lots**")
                 if signal["reasons"]:
-                    st.markdown("📝 Reason: " + " | ".join(signal["reasons"]))
+                    st.markdown(f"Reason: {' | '.join(signal['reasons'])}")
                 st.caption(f"Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             else:
-                st.error("⚠️ Failed to retrieve data.")
+                st.error("❌ Could not load data. Try again later.")
 
     if __name__ == "__main__":
         run_ui()
