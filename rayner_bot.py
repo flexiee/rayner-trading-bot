@@ -98,30 +98,30 @@ def generate_signal(data, account_balance):
     }
 
 def get_high_movement_markets():
-    movement_scores = []
+    movement = []
     for market, (exch, sym) in MARKET_SYMBOLS.items():
         try:
             data = get_live_data((exch, sym))
-            if data:
-                movement_scores.append((market, data["volatility"]))
+            if data and data['volatility'] > 0:
+                movement.append((market, data['volatility']))
         except:
             continue
-    movement_scores.sort(key=lambda x: x[1], reverse=True)
-    return [m[0] for m in movement_scores[:3]]
+    movement.sort(key=lambda x: x[1], reverse=True)
+    return movement[:3]
 
 if STREAMLIT_AVAILABLE:
     def run_ui():
-        st.set_page_config(layout="wide", page_title="Pro Trading Bot")
+        st.set_page_config(layout="wide", page_title="Rayner Trading Bot")
 
         st.markdown("""
-            <style>
-                .stApp {
-                    background-image: url('https://images.unsplash.com/photo-1611971260625-2c8d9b6de636?auto=format&fit=crop&w=1470&q=80');
-                    background-size: cover;
-                    background-position: center;
-                    color: white;
-                }
-            </style>
+        <style>
+        .stApp {
+            background-image: url('https://images.unsplash.com/photo-1611971260625-2c8d9b6de636?auto=format&fit=crop&w=1470&q=80');
+            background-size: cover;
+            background-position: center;
+            color: white;
+        }
+        </style>
         """, unsafe_allow_html=True)
 
         if "favorites" not in st.session_state:
@@ -143,10 +143,10 @@ if STREAMLIT_AVAILABLE:
         st.sidebar.markdown("---")
         st.sidebar.caption("📈 Select market")
 
-        high_moves = get_high_movement_markets()
-        st.sidebar.markdown("🔥 High Movement:")
-        for mover in high_moves:
-            st.sidebar.markdown(f"- {mover}")
+        movers = get_high_movement_markets()
+        for name, vol in movers:
+            if vol > 90:
+                st.warning(f"🔔 Huge move detected in {name} (Volatility: {vol})")
 
         category = st.sidebar.selectbox("Category", list(CATEGORIES.keys()))
         for market in CATEGORIES[category]:
@@ -172,13 +172,13 @@ if STREAMLIT_AVAILABLE:
             if data:
                 signal = generate_signal(data, account_balance)
 
-                st.subheader("Market Conditions")
+                st.subheader("📈 Market Conditions")
                 st.markdown(f"- Trend: **{data['trend']}**")
                 st.markdown(f"- Momentum: **{data['momentum']}**")
                 st.markdown(f"- Volatility: **{data['volatility']}**")
                 st.markdown(f"- Support: **{data['support']}**, Resistance: **{data['resistance']}**")
 
-                st.subheader("📍 Signal")
+                st.subheader("📌 Signal")
                 st.markdown(f"- Signal: `{signal['signal']}`")
                 st.markdown(f"- Entry: `{signal['entry']}`")
                 st.markdown(f"- Stop Loss: `{signal['stop_loss']}`, Take Profit: `{signal['take_profit']}`")
