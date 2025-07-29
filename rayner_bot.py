@@ -1,10 +1,10 @@
 import sys
 from datetime import datetime
-import pytz
 
 try:
     import streamlit as st
     from streamlit.components.v1 import iframe
+    import ta
     STREAMLIT_AVAILABLE = True
 except ImportError:
     STREAMLIT_AVAILABLE = False
@@ -16,6 +16,7 @@ except ImportError:
 
 tv = TvDatafeed()
 
+# --- Market Symbols Map ---
 MARKET_SYMBOLS = {
     "EUR/USD": ("OANDA", "EURUSD"),
     "GBP/JPY": ("OANDA", "GBPJPY"),
@@ -31,121 +32,123 @@ MARKET_SYMBOLS = {
     "BANKNIFTY": ("NSE", "BANKNIFTY"),
 }
 
-def get_live_data(symbol_info):
+# --- Data Fetch and Indicator Logic ---
+def get_data(symbol_info, interval, bars=50):
     exchange, symbol = symbol_info
-    df = tv.get_hist(symbol=symbol, exchange=exchange, interval=Interval.in_1_minute, n_bars=20)
-    if df is None or df.empty:
+    df = tv.get_hist(symbol=symbol, exchange=exchange, interval=interval, n_bars=bars)
+    return df
+
+def add_indicators(df):
+    df["ema9"] = ta.trend.ema_indicator(df["close"], window=9)
+    df["ema21"] = ta.trend.ema_indicator(df["close"], window=21)
+    df["rsi"] = ta.momentum.rsi(df["close"], window=14)
+    return df
+
+def get_analysis(symbol_info):
+    df_1m = get_data(symbol_info, Interval.in_1_minute)
+    df_5m = get_data(symbol_info, Interval.in_5_minute)
+
+    if df_1m is None or df_5m is None or df_1m.empty or df_5m.empty:
         return None
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    price = round(last['close'], 5)
-    prev_price = round(prev['close'], 5)
-    support = round(df['low'].min(), 5)
-    resistance = round(df['high'].max(), 5)
-    momentum = "strong" if abs(price - prev_price) > 0.0008 else "weak"
-    volatility = round(df['high'].std() * 10000)
-    trend = "uptrend" if price > df['close'].rolling(5).mean().iloc[-1] else "downtrend"
+
+    df_1m = add_indicators(df_1m)
+    df_5m = add_indicators(df_5m)
+
+    last_1m = df_1m.iloc[-1]
+    last_5m = df_5m.iloc[-1]
+
+    trend_1m = "uptrend" if last_1m["ema9"] > last_1m["ema21"] else "downtrend"
+    trend_5m = "uptrend" if last_5m["ema9"] > last_5m["ema21"] else "downtrend"
+
+    rsi_ok = last_1m["rsi"] > 50 if trend_1m == "uptrend" else last_1m["rsi"] < 50
+    ema_ok = (trend_1m == trend_5m)
+
     return {
-        "price": price,
-        "trend": trend,
-        "support": support,
-        "resistance": resistance,
-        "momentum": momentum,
-        "volatility": volatility,
-        "signal_strength": min(100, max(10, volatility))
+        "price": round(last_1m["close"], 5),
+        "trend": trend_1m,
+        "trend_match": trend_1m == trend_5m,
+        "rsi": round(last_1m["rsi"], 2),
+        "ema_fast": round(last_1m["ema9"], 5),
+        "ema_slow": round(last_1m["ema21"], 5),
+        "support": round(df_1m["low"].min(), 5),
+        "resistance": round(df_1m["high"].max(), 5),
+        "rsi_confirm": rsi_ok,
+        "ema_confirm": ema_ok
     }
 
-def calculate_lot_size(entry_price, stop_loss, account_balance, risk_percent=1):
-    pip_diff = abs(entry_price - stop_loss)
-    risk_amount = account_balance * (risk_percent / 100)
-    pip_value_per_lot = 10  # for standard forex pairs
-    if pip_diff == 0:
-        return 0
-    lot_size = risk_amount / (pip_diff * pip_value_per_lot)
-    return round(lot_size, 2), round(risk_amount, 2), round(risk_amount * 3, 2)
-
-def generate_signal(data, account_balance):
-    entry = data["price"]
-    sl, tp = None, None
+# --- Signal Generator ---
+def generate_signal(analysis, balance, risk_percent=1):
+    entry = analysis["price"]
+    sl = None
+    tp = None
     signal = "WAIT"
     reasons = []
 
-    if data["trend"] == "uptrend" and entry > data["support"]:
-        if data["momentum"] == "strong" and data["volatility"] > 50:
-            sl = entry - 0.0015
-            tp = entry + (entry - sl) * 3
-            signal = "BUY"
-            reasons.append("Strong uptrend breakout")
-    elif data["trend"] == "downtrend" and entry < data["resistance"]:
-        if data["momentum"] == "strong" and data["volatility"] > 50:
-            sl = entry + 0.0015
-            tp = entry - (sl - entry) * 3
-            signal = "SELL"
-            reasons.append("Strong downtrend breakout")
+    if analysis["trend"] == "uptrend" and analysis["trend_match"] and analysis["rsi_confirm"] and analysis["ema_confirm"]:
+        sl = entry - 0.0015
+        tp = entry + (entry - sl) * 3
+        signal = "BUY"
+        reasons.append("Uptrend confirmed (EMA & RSI)")
 
-    if sl:
-        lot_size, risk_amt, reward_amt = calculate_lot_size(entry, sl, account_balance)
-    else:
-        lot_size, risk_amt, reward_amt = 0, 0, 0
+    elif analysis["trend"] == "downtrend" and analysis["trend_match"] and analysis["rsi_confirm"] and analysis["ema_confirm"]:
+        sl = entry + 0.0015
+        tp = entry - (sl - entry) * 3
+        signal = "SELL"
+        reasons.append("Downtrend confirmed (EMA & RSI)")
+
+    risk_amt = balance * (risk_percent / 100)
+    pip_risk = abs(entry - sl) if sl else 0
+    lot_size = round(risk_amt / (pip_risk * 10), 2) if pip_risk else 0
 
     return {
         "signal": signal,
-        "entry": round(entry, 5),
+        "entry": entry,
         "stop_loss": round(sl, 5) if sl else None,
         "take_profit": round(tp, 5) if tp else None,
-        "confidence": data["signal_strength"],
-        "reasons": reasons,
-        "risk_amount": risk_amt,
-        "reward_amount": reward_amt,
-        "lot_size": lot_size
+        "risk": round(risk_amt, 2),
+        "reward": round(risk_amt * 3, 2),
+        "lot_size": lot_size,
+        "reasons": reasons
     }
 
+# --- Streamlit Interface ---
 if STREAMLIT_AVAILABLE:
     def run_ui():
-        st.set_page_config(layout="wide", page_title="Trading Bot with Lot Size & Risk Mgmt")
-        st.title("📊 Professional Forex Signal Bot")
+        st.set_page_config(layout="wide", page_title="Smart Trading Bot")
+        st.title("📈 Smart Trading Bot (Multi-Timeframe, RSI, EMA, Risk Management)")
 
-        if "selected_market" not in st.session_state:
-            st.session_state.selected_market = "EUR/USD"
-
-        market = st.selectbox("Select Market", list(MARKET_SYMBOLS.keys()), index=list(MARKET_SYMBOLS.keys()).index(st.session_state.selected_market))
-        st.session_state.selected_market = market
-
-        st.markdown("### 📈 Chart View")
+        market = st.selectbox("📌 Select Market", list(MARKET_SYMBOLS.keys()))
         exch, sym = MARKET_SYMBOLS[market]
         iframe(f"https://s.tradingview.com/widgetembed/?symbol={exch}:{sym}&interval=1&theme=dark", height=400)
 
-        account_balance = st.number_input("💰 Account Balance ($)", min_value=10, value=1000)
-        st.markdown("---")
+        balance = st.number_input("💰 Account Balance ($)", min_value=100, value=1000)
+        risk_percent = st.slider("📉 Risk per Trade (%)", min_value=0.5, max_value=5.0, value=1.0, step=0.5)
 
-        data = get_live_data((exch, sym))
-        if data:
-            signal = generate_signal(data, account_balance)
+        st.markdown("----")
 
-            st.subheader("📌 Market Snapshot")
-            st.markdown(f"- Trend: **{data['trend']}**")
-            st.markdown(f"- Momentum: **{data['momentum']}**")
-            st.markdown(f"- Volatility: **{data['volatility']}**")
-            st.markdown(f"- Support: **{data['support']}**")
-            st.markdown(f"- Resistance: **{data['resistance']}**")
+        with st.spinner("⏳ Analyzing market..."):
+            analysis = get_analysis((exch, sym))
+            if analysis:
+                signal = generate_signal(analysis, balance, risk_percent)
 
-            st.subheader("✅ Signal Result")
-            st.markdown(f"- Signal: `{signal['signal']}`")
-            st.markdown(f"- Confidence: **{signal['confidence']}%**")
-            st.progress(signal['confidence'])
+                st.subheader("📊 Technical Snapshot")
+                st.markdown(f"🔹 Trend (1m): **{analysis['trend']}**")
+                st.markdown(f"🔹 RSI: **{analysis['rsi']}**")
+                st.markdown(f"🔹 EMA 9: {analysis['ema_fast']} | EMA 21: {analysis['ema_slow']}")
+                st.markdown(f"🔹 Support: {analysis['support']} | Resistance: {analysis['resistance']}")
+                st.markdown(f"🔹 Timeframe Agreement (1m vs 5m): `{analysis['trend_match']}`")
 
-            st.markdown(f"- Entry Price: **{signal['entry']}**")
-            st.markdown(f"- Stop Loss: **{signal['stop_loss']}**  |  Take Profit: **{signal['take_profit']}**")
-            st.markdown(f"- 💸 Risk: `${signal['risk_amount']}` | 🟢 Reward: `${signal['reward_amount']}`")
-            st.markdown(f"- 📦 Recommended Lot Size: **{signal['lot_size']} lot(s)**")
-
-            if signal['reasons']:
-                st.markdown(f"**Reason:** {' | '.join(signal['reasons'])}")
-            st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        else:
-            st.error("❌ Failed to fetch live data.")
+                st.subheader("✅ Signal")
+                st.markdown(f"📈 Signal: `{signal['signal']}`")
+                st.markdown(f"💲 Entry: {signal['entry']} | SL: {signal['stop_loss']} | TP: {signal['take_profit']}")
+                st.markdown(f"📉 Risk: ${signal['risk']} | 🟢 Reward: ${signal['reward']} | 📦 Lot Size: `{signal['lot_size']}`")
+                if signal["reasons"]:
+                    st.markdown("📝 Reason: " + " | ".join(signal["reasons"]))
+                st.caption(f"Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            else:
+                st.error("⚠️ Failed to retrieve data.")
 
     if __name__ == "__main__":
         run_ui()
 else:
-    print("Streamlit is not installed. Install with: pip install streamlit")
+    print("Streamlit not installed.")
