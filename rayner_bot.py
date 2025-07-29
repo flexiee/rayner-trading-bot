@@ -111,13 +111,14 @@ def get_high_movement_markets():
 
 if STREAMLIT_AVAILABLE:
     def run_ui():
-        st.set_page_config(layout="wide", page_title="TradingView Risk Bot")
+        st.set_page_config(layout="wide", page_title="Pro Trading Bot")
 
         st.markdown("""
             <style>
                 .stApp {
-                    background-image: url('https://t4.ftcdn.net/jpg/03/22/51/58/360_F_322515847_Ii4Da6A2OlPQz5I18ikMG0R9wLoVWhdG.jpg');
+                    background-image: url('https://images.unsplash.com/photo-1611971260625-2c8d9b6de636?auto=format&fit=crop&w=1470&q=80');
                     background-size: cover;
+                    background-position: center;
                     color: white;
                 }
             </style>
