@@ -3,6 +3,8 @@ import pandas as pd
 import numpy as np
 import time
 from datetime import datetime, timedelta
+import yfinance as yf  # For stock/ETF data
+import requests  # For forex/commodity data
 
 # =============================
 # PURE PYTHON TECHNICAL INDICATORS
@@ -63,16 +65,9 @@ def calculate_atr(high, low, close, period=14):
 # =============================
 # TRADING STRATEGIES
 # =============================
-def existing_strategy(data):
-    """Placeholder for your original strategy"""
-    signals = pd.DataFrame(index=data.index)
-    signals['signal'] = 0
-    signals['price'] = data['close']
-    return signals
-
 def enhanced_rr_strategy(data, risk_percent=1.0):
     """
-    Enhanced 1:3 Risk-Reward Strategy with:
+    Enhanced 1:3 Risk-Reward Strategy for all markets
     - Triple confirmation entry (EMA + RSI + Volume)
     - ATR-based dynamic stop loss
     - Fibonacci-based take profit levels
@@ -84,12 +79,16 @@ def enhanced_rr_strategy(data, risk_percent=1.0):
     df['ema_50'] = calculate_ema(df['close'].values, 50)
     df['rsi'] = calculate_rsi(df['close'].values, 14)
     df['atr'] = calculate_atr(df['high'].values, df['low'].values, df['close'].values, 14)
-    df['volume_ma'] = df['volume'].rolling(20).mean().fillna(0)
+    
+    if 'volume' in df.columns:
+        df['volume_ma'] = df['volume'].rolling(20).mean().fillna(0)
+        volume_condition = (df['volume'] > df['volume_ma'] * 1.2)
+    else:
+        volume_condition = True  # Skip volume check if not available
     
     # 2. Entry Logic with Triple Confirmation
     trend_condition = (df['ema_20'] > df['ema_50'])
     rsi_condition = (df['rsi'] > 40) & (df['rsi'] < 70) & (df['rsi'].diff() > 0)
-    volume_condition = (df['volume'] > df['volume_ma'] * 1.2)
     df['entry_signal'] = trend_condition & rsi_condition & volume_condition
     
     # 3. Dynamic Risk Management
@@ -112,87 +111,169 @@ def enhanced_rr_strategy(data, risk_percent=1.0):
     return df
 
 # =============================
-# DATA GENERATION (NO EXTERNAL DEPENDENCIES)
+# DATA FETCHING FOR ALL MARKETS
 # =============================
-def generate_mock_market_data():
-    """Generate realistic mock market data"""
-    np.random.seed(42)
-    dates = pd.date_range(end=datetime.now(), periods=500, freq='H')
-    base_price = np.random.uniform(100, 500)
+def fetch_market_data(market_type, symbol, period='1d', interval='1h'):
+    """Fetch data for any market type"""
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=30)
     
-    # Generate price movements with momentum
-    price_changes = np.random.normal(0, 0.5, 500)
-    prices = base_price * np.exp(np.cumsum(price_changes))
-    
-    # Generate realistic OHLCV data
-    opens = prices[:-1]
-    closes = prices[1:]
-    highs = np.maximum(opens, closes) + np.abs(np.random.normal(0, 0.5, 499))
-    lows = np.minimum(opens, closes) - np.abs(np.random.normal(0, 0.5, 499))
-    volumes = np.random.lognormal(mean=5, sigma=0.5, size=499)
-    
-    # Add some volatility spikes
-    spike_indices = np.random.choice(range(499), size=10, replace=False)
-    for i in spike_indices:
-        highs[i] *= 1.05
-        lows[i] *= 0.95
-        volumes[i] *= 2.0
-    
-    # Create DataFrame
-    df = pd.DataFrame({
-        'open': np.concatenate([[base_price], opens]),
-        'high': np.concatenate([[base_price * 1.01], highs]),
-        'low': np.concatenate([[base_price * 0.99], lows]),
-        'close': np.concatenate([[base_price], closes]),
-        'volume': np.concatenate([[1000], volumes])
-    }, index=dates)
-    
-    return df
+    try:
+        if market_type == "Crypto":
+            # Format symbol for crypto (BTC-USD format)
+            crypto_symbol = symbol.replace("/", "-")
+            df = yf.download(crypto_symbol, start=start_date, end=end_date, interval=interval)
+            return df
+        
+        elif market_type == "Stocks":
+            df = yf.download(symbol, start=start_date, end=end_date, interval=interval)
+            return df
+        
+        elif market_type == "Forex":
+            # Format symbol for forex (EURUSD=X format)
+            forex_symbol = symbol.replace("/", "") + "=X"
+            df = yf.download(forex_symbol, start=start_date, end=end_date, interval=interval)
+            return df
+        
+        elif market_type == "Commodities":
+            # Map commodities to their Yahoo Finance symbols
+            commodity_map = {
+                "Gold": "GC=F",
+                "Silver": "SI=F",
+                "Oil": "CL=F",
+                "Natural Gas": "NG=F",
+                "Copper": "HG=F"
+            }
+            if symbol in commodity_map:
+                df = yf.download(commodity_map[symbol], start=start_date, end=end_date, interval=interval)
+                return df
+            else:
+                st.error(f"Commodity {symbol} not supported")
+                return None
+        
+        elif market_type == "Indices":
+            # Map indices to their Yahoo Finance symbols
+            index_map = {
+                "S&P 500": "^GSPC",
+                "NASDAQ": "^IXIC",
+                "Dow Jones": "^DJI",
+                "FTSE 100": "^FTSE",
+                "DAX": "^GDAXI",
+                "Nikkei 225": "^N225"
+            }
+            if symbol in index_map:
+                df = yf.download(index_map[symbol], start=start_date, end=end_date, interval=interval)
+                return df
+            else:
+                st.error(f"Index {symbol} not supported")
+                return None
+                
+    except Exception as e:
+        st.error(f"Error fetching data: {str(e)}")
+        return None
 
 # =============================
-# STREAMLIT APP (NO EXTERNAL DEPENDENCIES)
+# TRADINGVIEW CHART EMBED
+# =============================
+def get_tradingview_chart(symbol, market_type, interval="1H"):
+    """Generate TradingView chart embed code for any market"""
+    # Map market types to TradingView formats
+    if market_type == "Crypto":
+        exchange = "BINANCE"
+        tv_symbol = f"{exchange}:{symbol.replace('/', '')}"
+    elif market_type == "Stocks":
+        tv_symbol = symbol
+    elif market_type == "Forex":
+        tv_symbol = f"FX:{symbol.replace('/', '')}"
+    elif market_type == "Commodities":
+        tv_symbol = f"TVC:{symbol.upper()}"
+    elif market_type == "Indices":
+        tv_symbol = f"INDICES:{symbol}"
+    else:
+        tv_symbol = symbol
+    
+    # Map intervals
+    interval_map = {
+        "1m": "1",
+        "5m": "5",
+        "15m": "15",
+        "30m": "30",
+        "1h": "60",
+        "4h": "240",
+        "1d": "1D",
+        "1w": "1W"
+    }
+    tv_interval = interval_map.get(interval, "60")
+    
+    return f"""
+    <div class="tradingview-widget-container">
+      <div id="tradingview_chart" style="height:600px; width:100%;"></div>
+      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+      <script type="text/javascript">
+        new TradingView.widget(
+          {{
+            "autosize": true,
+            "symbol": "{tv_symbol}",
+            "interval": "{tv_interval}",
+            "timezone": "Etc/UTC",
+            "theme": "dark",
+            "style": "1",
+            "locale": "en",
+            "toolbar_bg": "#f1f3f6",
+            "enable_publishing": false,
+            "hide_top_toolbar": false,
+            "hide_legend": false,
+            "save_image": false,
+            "container_id": "tradingview_chart"
+          }}
+        );
+      </script>
+    </div>
+    """
+
+# =============================
+# STREAMLIT APP
 # =============================
 def main():
     st.set_page_config(
-        page_title="Advanced Crypto Trading Bot",
+        page_title="Universal Trading Bot",
         layout="wide",
-        page_icon="💰"
+        page_icon="📊"
     )
     
-    st.title("💰 Advanced Crypto Trading Bot")
-    st.write("Multi-Strategy Bot with Enhanced Risk Management")
-    st.info("Using mock data - no external dependencies required")
+    st.title("🌎 Universal Trading Bot")
+    st.subheader("Trade All Markets with 1:3 Risk-Reward Strategy")
     
     with st.sidebar:
-        st.header("Strategy Configuration")
+        st.header("⚙️ Trading Configuration")
         
-        # Market Selection
-        markets = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", 
-                  "ADA/USDT", "DOGE/USDT", "DOT/USDT", "AVAX/USDT"]
-        selected_market = st.selectbox("Trading Pair", markets, index=0)
+        # Market Type Selection
+        market_types = ["Crypto", "Stocks", "Forex", "Commodities", "Indices"]
+        market_type = st.selectbox("Market Type", market_types, index=0)
         
-        # Strategy Selection
-        strategy_options = {
-            "Original Strategy": existing_strategy,
-            "Enhanced 1:3 Risk-Reward": enhanced_rr_strategy
+        # Symbol Selection based on market type
+        symbol_options = {
+            "Crypto": ["BTC/USD", "ETH/USD", "SOL/USD", "BNB/USD", "XRP/USD"],
+            "Stocks": ["AAPL", "MSFT", "TSLA", "AMZN", "GOOGL", "META", "NFLX"],
+            "Forex": ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD"],
+            "Commodities": ["Gold", "Silver", "Oil", "Natural Gas", "Copper"],
+            "Indices": ["S&P 500", "NASDAQ", "Dow Jones", "FTSE 100", "DAX"]
         }
-        strategy_choice = st.radio("Trading Strategy", list(strategy_options.keys()))
+        symbol = st.selectbox("Trading Symbol", symbol_options[market_type], index=0)
         
-        # Risk Parameters
-        risk_percent = st.slider("Risk per Trade (%)", 0.1, 5.0, 1.0, 0.1)
+        # Strategy Parameters
+        st.subheader("📈 Strategy Parameters")
+        risk_percent = st.slider("Risk per Trade (%)", 0.1, 10.0, 1.0, 0.1)
+        interval = st.selectbox("Chart Interval", ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"], index=4)
         
-        # Volatility Filter
+        # Risk Management
+        st.subheader("🛡️ Risk Management")
         volatility_filter = st.checkbox("Enable Volatility Filter", True)
-        min_volatility = st.slider("Min ATR %", 0.5, 5.0, 1.5, 0.1) if volatility_filter else 0
+        min_volatility = st.slider("Min Volatility (ATR %)", 0.5, 5.0, 1.5, 0.1) if volatility_filter else 0
         
         # Data Refresh
+        st.subheader("🔄 System Settings")
         refresh_rate = st.selectbox("Refresh Rate (seconds)", [10, 30, 60, 300], index=2)
-        
-        # Performance Metrics
-        st.subheader("Performance Metrics")
-        st.metric("Win Rate", "72.3%", "+3.2%")
-        st.metric("Profit Factor", "1.87", "+0.11")
-        st.metric("Max Drawdown", "-15.4%", "-2.1%")
     
     # Initialize session state
     if 'last_refresh' not in st.session_state:
@@ -203,30 +284,36 @@ def main():
         st.session_state.last_refresh = datetime.now()
         st.experimental_rerun()
     
-    # Load mock data
-    data = generate_mock_market_data()
+    # Fetch market data
+    data = fetch_market_data(market_type, symbol, interval=interval)
     
-    # Strategy execution
-    strategy = strategy_options[strategy_choice]
-    results = strategy(data, risk_percent)
+    if data is None or data.empty:
+        st.warning("Failed to fetch market data. Please try another symbol or market.")
+        return
     
-    # Get last signal
+    # Run trading strategy
+    results = enhanced_rr_strategy(data, risk_percent)
     last_signal = results.iloc[-1]
     
+    # Display TradingView chart
+    st.header(f"📊 Live TradingView Chart: {symbol}")
+    tradingview_html = get_tradingview_chart(symbol, market_type, interval)
+    st.components.v1.html(tradingview_html, height=600)
+    
     # Display key metrics
-    st.write(f"**Active Strategy:** {strategy_choice} | **Market:** {selected_market}")
+    st.header("📈 Trading Signals & Metrics")
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Current Price", f"${last_signal['close']:.4f}")
-    col2.metric("Volatility (ATR)", f"${last_signal['atr']:.4f}", 
+    col1.metric("Current Price", f"${last_signal['close']:.4f}" if market_type != "Forex" else f"${last_signal['close']:.6f}")
+    col2.metric("Volatility (ATR)", f"{last_signal['atr']:.4f}", 
                 f"{last_signal['atr']/last_signal['close']*100:.2f}%")
-    col3.metric("Stop Loss", f"${last_signal['stop_loss']:.4f}", 
+    col3.metric("Stop Loss", f"{last_signal['stop_loss']:.4f}", 
                 f"-{(last_signal['close']-last_signal['stop_loss'])/last_signal['close']*100:.2f}%")
-    col4.metric("Position Size", f"{last_signal['position_size']:.4f} {selected_market.split('/')[0]}")
+    col4.metric("Position Size", f"{last_signal['position_size']:.4f} units")
     
-    # Strategy visualization using Streamlit native charts
-    st.subheader("Price and Indicators")
+    # Strategy visualization
+    st.header("🔍 Strategy Analysis")
     
-    # Create a new dataframe for charting
+    # Create chart data
     chart_data = results[['close', 'ema_20', 'ema_50']].copy()
     chart_data = chart_data.rename(columns={
         'close': 'Price',
@@ -238,21 +325,22 @@ def main():
     st.line_chart(chart_data)
     
     # Visualize entry signals
-    st.subheader("Entry Signals")
+    st.subheader("🚦 Entry Signals")
     entry_points = results[results['entry_signal'] == True]
     if not entry_points.empty:
         st.write("Recent entry signals:")
-        st.dataframe(entry_points[['close', 'volume', 'rsi']].tail(5))
+        st.dataframe(entry_points[['close', 'rsi']].tail(5).style.format({
+            'close': '{:.4f}',
+            'rsi': '{:.2f}'
+        }))
         
-        # Mark last entry on price chart
         last_entry = entry_points.iloc[-1]
-        st.info(f"Last Entry Signal: {last_entry.name.strftime('%Y-%m-%d %H:%M')} "
-                f"at ${last_entry['close']:.4f}")
+        st.success(f"✅ Last Entry Signal: {last_entry.name.strftime('%Y-%m-%d %H:%M')} at ${last_entry['close']:.4f}")
     else:
-        st.warning("No recent entry signals")
+        st.warning("⚠️ No recent entry signals")
     
     # Risk management visualization
-    st.subheader("Risk Management Levels")
+    st.subheader("🎯 Risk Management Levels")
     
     # Create a dataframe for risk levels
     risk_data = pd.DataFrame({
@@ -279,27 +367,30 @@ def main():
     st.bar_chart(risk_data.set_index('Level')['Price'])
     
     # Strategy details
-    with st.expander("Strategy Details & Conditions"):
-        st.subheader("Current Signal Analysis")
+    with st.expander("📖 Strategy Details & Conditions"):
+        st.subheader("Strategy Analysis")
         
         col1, col2 = st.columns(2)
         
         with col1:
-            st.write("**Entry Conditions:**")
+            st.write("**📊 Entry Conditions:**")
             st.write(f"- Trend: EMA(20) > EMA(50): {'✅' if last_signal['ema_20'] > last_signal['ema_50'] else '❌'}")
             st.write(f"- Momentum: RSI(14) 40-70 & Rising: {'✅' if 40 < last_signal['rsi'] < 70 and last_signal['rsi'] > results['rsi'].iloc[-2] else '❌'}")
-            st.write(f"- Volume > 120% of 20D MA: {'✅' if last_signal['volume'] > last_signal['volume_ma'] * 1.2 else '❌'}")
+            if 'volume_ma' in last_signal:
+                st.write(f"- Volume > 120% of 20D MA: {'✅' if last_signal['volume'] > last_signal['volume_ma'] * 1.2 else '❌'}")
+            else:
+                st.write("- Volume condition: N/A for this market")
             
-            st.write(f"**Entry Signal:** {'✅ ACTIVE' if last_signal['entry_signal'] else '❌ INACTIVE'}")
+            st.write(f"**🚀 Entry Signal:** {'✅ ACTIVE' if last_signal['entry_signal'] else '❌ INACTIVE'}")
             
         with col2:
-            st.write("**Risk Parameters:**")
+            st.write("**⚖️ Risk Parameters:**")
             st.write(f"- Risk per Trade: {risk_percent}%")
             st.write(f"- Stop Loss: ${last_signal['stop_loss']:.4f}")
             st.write(f"- Take Profit 1: ${last_signal['tp_1']:.4f} (61.8%)")
             st.write(f"- Take Profit 2: ${last_signal['tp_2']:.4f} (161.8%)")
             st.write(f"- Take Profit 3: ${last_signal['tp_3']:.4f} (261.8%)")
-            st.write(f"- Position Size: {last_signal['position_size']:.4f} coins")
+            st.write(f"- Position Size: {last_signal['position_size']:.4f} units")
     
     # Auto-refresh countdown
     refresh_count = refresh_rate - (datetime.now() - st.session_state.last_refresh).seconds
