@@ -1,5 +1,5 @@
 # =============================
-# UNIVERSAL TRADING BOT (REAL-TIME, MULTI-MARKET) with Full Trader Strategies
+# UNIVERSAL TRADING BOT (REAL-TIME, MULTI-MARKET) with Full Trader Strategies + Signal History & Live Signal Monitoring
 # =============================
 
 import sys
@@ -58,6 +58,8 @@ SESSIONS = {
     "Sydney (Pacific)": {"start": 9, "end": 17, "timezone": "Australia/Sydney"},
     "Crypto Peak (UTC)": {"start": 12, "end": 21, "timezone": "UTC"},
 }
+
+SIGNAL_HISTORY = []
 
 # Session detection
 
@@ -173,7 +175,7 @@ def generate_signal(data, account_balance):
         signal = "BUY" if data["trend"] == "uptrend" else "SELL"
         reasons.append("Breakout with trend and momentum alignment")
 
-    return {
+    result = {
         "signal": signal,
         "entry": round(entry, 5),
         "stop_loss": round(sl, 5),
@@ -181,8 +183,11 @@ def generate_signal(data, account_balance):
         "confidence": data["signal_strength"],
         "reasons": reasons,
         "risk_amount": round(risk_amount, 2),
-        "reward_amount": round(risk_amount * 3, 2)
+        "reward_amount": round(risk_amount * 3, 2),
+        "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     }
+    SIGNAL_HISTORY.append(result)
+    return result
 
 # UI
 
@@ -227,8 +232,12 @@ if STREAMLIT_AVAILABLE:
                 st.progress(signal['confidence'])
                 st.markdown(f"- 💸 Risk: ${signal['risk_amount']} | 🟢 Reward: ${signal['reward_amount']}")
                 st.markdown(f"- Reason: {' | '.join(signal['reasons'])}")
-            else:
-                st.error("No data available.")
+
+        st.markdown("---")
+        if SIGNAL_HISTORY:
+            st.subheader("📜 Signal History")
+            df_hist = pd.DataFrame(SIGNAL_HISTORY)
+            st.dataframe(df_hist[::-1], use_container_width=True)
 
     if __name__ == "__main__":
         run_ui()
