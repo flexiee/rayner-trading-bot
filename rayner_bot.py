@@ -1,189 +1,100 @@
-import base64
-from datetime import datetime
 import streamlit as st
-from tvDatafeed import TvDatafeed, Interval
 import pandas as pd
+from your_existing_modules import existing_strategy  # Import your original strategy
 
-tv = TvDatafeed()
+# ======================
+# NEW RISK-REWARD STRATEGY
+# ======================
+def risk_reward_strategy(data, risk_percent=1.0):
+    """
+    New strategy with 1:3 risk-reward ratio
+    """
+    signals = pd.DataFrame(index=data.index)
+    signals['price'] = data['close']
+    
+    # ENTRY LOGIC (example using EMA crossover - customize with your preferred indicators)
+    signals['ema_short'] = data['close'].ewm(span=20).mean()
+    signals['ema_long'] = data['close'].ewm(span=50).mean()
+    signals['entry'] = np.where(signals['ema_short'] > signals['ema_long'], 1, 0)
+    
+    # RISK MANAGEMENT (1:3 ratio)
+    signals['stop_loss'] = signals['price'] * (1 - risk_percent/100)
+    signals['take_profit'] = signals['price'] * (1 + (3 * risk_percent)/100)
+    
+    return signals
 
-MARKET_SYMBOLS = {
-    "EUR/USD": ("OANDA", "EURUSD"),
-    "GBP/JPY": ("OANDA", "GBPJPY"),
-    "USD/JPY": ("OANDA", "USDJPY"),
-    "AUD/USD": ("OANDA", "AUDUSD"),
-    "XAU/USD": ("OANDA", "XAUUSD"),
-    "BTC/USD": ("BINANCE", "BTCUSDT"),
-    "ETH/USD": ("BINANCE", "ETHUSDT"),
-    "Gold": ("OANDA", "XAUUSD"),
-    "Silver": ("OANDA", "XAGUSD"),
-    "Oil WTI": ("OANDA", "WTICOUSD"),
-    "NIFTY 50": ("NSE", "NIFTY"),
-    "BANKNIFTY": ("NSE", "BANKNIFTY"),
-}
+# ======================
+# STREAMLIT UI UPGRADES
+# ======================
+st.sidebar.header("Strategy Configuration")
 
-CATEGORIES = {
-    "Forex": ["EUR/USD", "GBP/JPY", "USD/JPY", "AUD/USD", "XAU/USD"],
-    "Crypto": ["BTC/USD", "ETH/USD"],
-    "Commodities": ["Gold", "Silver", "Oil WTI"],
-    "Indices": ["NIFTY 50", "BANKNIFTY"]
-}
+# 1. Market Selection
+markets = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT"]
+selected_market = st.sidebar.selectbox("Select Trading Market", markets)
 
-def get_encoded_image():
-    image_base64 = '''
-    iVBORw0KGgoAAAANSUhEUgAAA...<TRIMMED FOR SPACE>...AAAElFTkSuQmCC
-    '''  # Replace this with actual base64 from 13812.png
-    return image_base64.strip()
+# 2. Strategy Selection
+strategy_choice = st.sidebar.radio("Choose Strategy", 
+                                  ["Existing Strategy", "1:3 Risk-Reward Strategy"])
 
-def get_live_data(symbol_info):
-    exchange, symbol = symbol_info
-    df = tv.get_hist(symbol=symbol, exchange=exchange, interval=Interval.in_1_minute, n_bars=20)
-    if df is None or df.empty:
-        return None
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    price = round(last['close'], 5)
-    prev_price = round(prev['close'], 5)
-    support = round(df['low'].min(), 5)
-    resistance = round(df['high'].max(), 5)
-    momentum = "strong" if abs(price - prev_price) > 0.0008 else "weak"
-    volatility = round(df['high'].std() * 10000)
-    trend = "uptrend" if price > df['close'].rolling(5).mean().iloc[-1] else "downtrend"
-    return {
-        "price": price,
-        "trend": trend,
-        "support": support,
-        "resistance": resistance,
-        "momentum": momentum,
-        "volatility": volatility,
-        "signal_strength": min(100, max(10, volatility)),
-        "change": price - prev_price
-    }
+# 3. Risk Parameters
+risk_percent = st.sidebar.slider("Risk Percentage per Trade", 
+                                min_value=0.1, max_value=5.0, 
+                                value=1.0, step=0.1) / 100.0
 
-def generate_signal(data, account_balance):
-    entry = data["price"]
-    risk_amount = account_balance * 0.01
-    pip_value = 10
-    pip_risk = risk_amount / pip_value
-    sl, tp = None, None
-    signal = "WAIT"
-    reasons = []
+# ======================
+# TRADING EXECUTION
+# ======================
+def run_trading_bot():
+    # Fetch market data (replace with your actual data source)
+    data = fetch_market_data(selected_market)
+    
+    if strategy_choice == "Existing Strategy":
+        results = existing_strategy(data)
+    else:
+        results = risk_reward_strategy(data, risk_percent=risk_percent*100)
+        
+        # Visualize risk-reward levels
+        st.subheader("Risk-Reward Levels")
+        last_signal = results.iloc[-1]
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Entry Price", f"${last_signal['price']:.2f}")
+        col2.metric("Stop Loss", f"${last_signal['stop_loss']:.2f}", f"-{risk_percent*100:.1f}%")
+        col3.metric("Take Profit", f"${last_signal['take_profit']:.2f}", f"+{risk_percent*300:.1f}%")
+    
+    # Display strategy results
+    st.subheader("Trading Signals")
+    st.dataframe(results.tail())
+    
+    # Visualize the strategy
+    st.subheader("Price Chart")
+    fig = px.line(results, x=results.index, y='price', title=f"{selected_market} Price")
+    
+    if strategy_choice == "1:3 Risk-Reward Strategy":
+        fig.add_scatter(x=[results.index[-1]], y=[last_signal['stop_loss']],
+                        mode='markers', name='Stop Loss')
+        fig.add_scatter(x=[results.index[-1]], y=[last_signal['take_profit']],
+                        mode='markers', name='Take Profit')
+    
+    st.plotly_chart(fig)
 
-    if data["trend"] == "uptrend" and entry > data["support"]:
-        if data["momentum"] == "strong" and data["volatility"] > 50:
-            sl = entry - pip_risk
-            tp = entry + (entry - sl) * 3
-            signal = "BUY"
-            reasons.append("Strong uptrend breakout")
-    elif data["trend"] == "downtrend" and entry < data["resistance"]:
-        if data["momentum"] == "strong" and data["volatility"] > 50:
-            sl = entry + pip_risk
-            tp = entry - (sl - entry) * 3
-            signal = "SELL"
-            reasons.append("Strong downtrend breakout")
+# ======================
+# RISK MANAGEMENT CHECKS
+# ======================
+def validate_risk_parameters():
+    if risk_percent > 0.05:
+        st.warning("⚠️ High risk percentage! Recommended max 5% per trade")
+    if strategy_choice == "1:3 Risk-Reward Strategy":
+        st.success(f"✅ 1:3 Risk-Reward Active | Risk: {risk_percent*100:.1f}% | Reward: {risk_percent*300:.1f}%")
 
-    lot_size = round(risk_amount / abs(entry - sl), 2) if sl else 0
-
-    return {
-        "signal": signal,
-        "entry": round(entry, 5),
-        "stop_loss": round(sl, 5) if sl else None,
-        "take_profit": round(tp, 5) if tp else None,
-        "confidence": data["signal_strength"],
-        "reasons": reasons,
-        "risk_amount": round(risk_amount, 2),
-        "reward_amount": round(risk_amount * 3, 2),
-        "lot_size": lot_size
-    }
-
-def run_ui():
-    st.set_page_config(layout="wide", page_title="📈 Pro Trading Bot")
-
-    bg = get_encoded_image()
-    st.markdown(f"""
-        <style>
-        .stApp {{
-            background-image: url("data:image/png;base64,{bg}");
-            background-size: cover;
-            background-position: center;
-            background-attachment: fixed;
-            color: white;
-        }}
-        </style>
-    """, unsafe_allow_html=True)
-
-    st.title("📈 Pro Trading Bot")
-    if "favorites" not in st.session_state:
-        st.session_state.favorites = []
-    if "selected_market" not in st.session_state:
-        st.session_state.selected_market = "EUR/USD"
-
-    # Account balance
-    account_balance = st.sidebar.number_input("Account Balance ($)", value=1000, min_value=10)
-
-    # High movement
-    movement_scores = {}
-    for market, info in MARKET_SYMBOLS.items():
-        data = get_live_data(info)
-        if data:
-            movement_scores[market] = abs(data["change"])
-
-    high_movement = sorted(movement_scores.items(), key=lambda x: x[1], reverse=True)[:3]
-    st.sidebar.subheader("🔥 High Movement Markets")
-    for market, delta in high_movement:
-        st.sidebar.write(f"{market}: {round(delta, 5)}")
-
-    # Watchlist
-    st.sidebar.subheader("⭐ Watchlist")
-    for fav in st.session_state.favorites:
-        exch, sym = MARKET_SYMBOLS[fav]
-        df = tv.get_hist(sym, exch, Interval.in_1_minute, n_bars=1)
-        if df is not None and not df.empty:
-            price = df.iloc[-1]["close"]
-            st.sidebar.markdown(f"**{fav}**: {round(price, 5)}")
-
-    # Category picker
-    st.sidebar.subheader("📂 Market Categories")
-    category = st.sidebar.selectbox("Choose Category", list(CATEGORIES.keys()))
-    for market in CATEGORIES[category]:
-        col1, col2 = st.columns([8, 1])
-        if col1.button(market):
-            st.session_state.selected_market = market
-        if col2.button("⭐" if market in st.session_state.favorites else "☆", key=market):
-            if market in st.session_state.favorites:
-                st.session_state.favorites.remove(market)
-            else:
-                st.session_state.favorites.append(market)
-
-    # Display Market
-    selected = st.session_state.selected_market
-    exch, sym = MARKET_SYMBOLS[selected]
-    st.subheader(f"📊 {selected} Live Market")
-    st.components.v1.iframe(f"https://s.tradingview.com/widgetembed/?symbol={exch}:{sym}&interval=1&theme=dark", height=400)
-
-    # Manual refresh
-    if st.button("🔄 Refresh Signal"):
-        data = get_live_data((exch, sym))
-        if data:
-            signal = generate_signal(data, account_balance)
-            st.subheader("📌 Market Snapshot")
-            st.write(f"Trend: {data['trend']}")
-            st.write(f"Momentum: {data['momentum']}")
-            st.write(f"Volatility: {data['volatility']}")
-            st.write(f"Support: {data['support']}")
-            st.write(f"Resistance: {data['resistance']}")
-
-            st.subheader("✅ Signal Result")
-            st.write(f"Signal: {signal['signal']}")
-            st.progress(signal["confidence"])
-            st.write(f"Entry: {signal['entry']} | SL: {signal['stop_loss']} | TP: {signal['take_profit']}")
-            st.write(f"Risk: ${signal['risk_amount']} | Reward: ${signal['reward_amount']}")
-            st.write(f"Recommended Lot Size: {signal['lot_size']}")
-            st.caption(f"Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
-            if data['volatility'] > 100:
-                st.warning("⚠️ Huge movement detected!")
-        else:
-            st.error("Unable to fetch data.")
-
+# ======================
+# MAIN APP EXECUTION
+# ======================
 if __name__ == "__main__":
-    run_ui()
+    st.title("Enhanced Trading Bot")
+    validate_risk_parameters()
+    run_trading_bot()
+    
+    # New performance metrics
+    st.subheader("Risk-Reward Performance")
+    st.metric("Target Reward Ratio", "1:3")
+    st.progress(0.75)  # Example success rate
