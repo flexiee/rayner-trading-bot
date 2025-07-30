@@ -13,10 +13,8 @@ import yfinance as yf
 # TECHNICAL INDICATORS
 # =============================
 def calculate_ema(prices, period):
-    prices = pd.Series(prices).squeeze()
-    if len(prices.shape) > 1:
-        prices = prices.iloc[:, 0]  # flatten if needed
-    return prices.ewm(span=period, adjust=False).mean().values
+    prices = np.asarray(prices).flatten()
+    return pd.Series(prices).ewm(span=period, adjust=False).mean().values
 
 def calculate_rsi(prices, period=14):
     prices = np.asarray(prices).flatten()
