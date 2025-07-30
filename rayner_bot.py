@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import time
-import ccxt
 from datetime import datetime, timedelta
 
 # =============================
@@ -113,34 +112,45 @@ def enhanced_rr_strategy(data, risk_percent=1.0):
     return df
 
 # =============================
-# DATA FETCHING FUNCTIONS
+# DATA GENERATION (NO EXTERNAL DEPENDENCIES)
 # =============================
-def fetch_market_data(symbol, period='1d', timeframe='1h'):
-    """Fetch market data from Binance (replace with your actual data source)"""
-    exchange = ccxt.binance()
-    since = exchange.parse8601((datetime.now() - timedelta(days=30)).isoformat())
+def generate_mock_market_data():
+    """Generate realistic mock market data"""
+    np.random.seed(42)
+    dates = pd.date_range(end=datetime.now(), periods=500, freq='H')
+    base_price = np.random.uniform(100, 500)
     
-    try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
-        return df.apply(pd.to_numeric)
-    except:
-        # Fallback to mock data if API fails
-        st.warning("API failed - using mock data")
-        dates = pd.date_range(end=datetime.now(), periods=200, freq='H')
-        prices = np.cumsum(np.random.randn(200)) + 100
-        return pd.DataFrame({
-            'open': prices,
-            'high': prices + np.random.rand(200),
-            'low': prices - np.random.rand(200),
-            'close': prices,
-            'volume': np.random.randint(100, 1000, 200)
-        }, index=dates)
+    # Generate price movements with momentum
+    price_changes = np.random.normal(0, 0.5, 500)
+    prices = base_price * np.exp(np.cumsum(price_changes))
+    
+    # Generate realistic OHLCV data
+    opens = prices[:-1]
+    closes = prices[1:]
+    highs = np.maximum(opens, closes) + np.abs(np.random.normal(0, 0.5, 499))
+    lows = np.minimum(opens, closes) - np.abs(np.random.normal(0, 0.5, 499))
+    volumes = np.random.lognormal(mean=5, sigma=0.5, size=499)
+    
+    # Add some volatility spikes
+    spike_indices = np.random.choice(range(499), size=10, replace=False)
+    for i in spike_indices:
+        highs[i] *= 1.05
+        lows[i] *= 0.95
+        volumes[i] *= 2.0
+    
+    # Create DataFrame
+    df = pd.DataFrame({
+        'open': np.concatenate([[base_price], opens]),
+        'high': np.concatenate([[base_price * 1.01], highs]),
+        'low': np.concatenate([[base_price * 0.99], lows]),
+        'close': np.concatenate([[base_price], closes]),
+        'volume': np.concatenate([[1000], volumes])
+    }, index=dates)
+    
+    return df
 
 # =============================
-# STREAMLIT APP (WITHOUT PLOTLY)
+# STREAMLIT APP (NO EXTERNAL DEPENDENCIES)
 # =============================
 def main():
     st.set_page_config(
@@ -151,6 +161,7 @@ def main():
     
     st.title("💰 Advanced Crypto Trading Bot")
     st.write("Multi-Strategy Bot with Enhanced Risk Management")
+    st.info("Using mock data - no external dependencies required")
     
     with st.sidebar:
         st.header("Strategy Configuration")
@@ -192,8 +203,8 @@ def main():
         st.session_state.last_refresh = datetime.now()
         st.experimental_rerun()
     
-    # Load data
-    data = fetch_market_data(selected_market)
+    # Load mock data
+    data = generate_mock_market_data()
     
     # Strategy execution
     strategy = strategy_options[strategy_choice]
