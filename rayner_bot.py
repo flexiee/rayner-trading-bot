@@ -12,6 +12,7 @@ import time
 try:
     import streamlit as st
     from streamlit.components.v1 import iframe
+    import plotly.graph_objs as go
     STREAMLIT_AVAILABLE = True
 except ImportError:
     STREAMLIT_AVAILABLE = False
@@ -157,7 +158,8 @@ def get_live_data(symbol_info):
         "volatility": volatility,
         "signal_strength": signal_strength,
         "breakout": bool(last['breakout']),
-        "atr": last['atr']
+        "atr": last['atr'],
+        "df": df  # Include full dataframe for plotting
     }
 
 # Signal Logic
@@ -175,19 +177,24 @@ def generate_signal(data, account_balance):
         signal = "BUY" if data["trend"] == "uptrend" else "SELL"
         reasons.append("Breakout with trend and momentum alignment")
 
-    result = {
-        "signal": signal,
-        "entry": round(entry, 5),
-        "stop_loss": round(sl, 5),
-        "take_profit": round(tp, 5),
-        "confidence": data["signal_strength"],
-        "reasons": reasons,
-        "risk_amount": round(risk_amount, 2),
-        "reward_amount": round(risk_amount * 3, 2),
-        "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    }
-    SIGNAL_HISTORY.append(result)
-    return result
+    if signal in ["BUY", "SELL"]:
+        result = {
+            "signal": signal,
+            "entry": round(entry, 5),
+            "stop_loss": round(sl, 5),
+            "take_profit": round(tp, 5),
+            "confidence": data["signal_strength"],
+            "trend": data['trend'],
+            "momentum": data['momentum'],
+            "breakout": data['breakout'],
+            "reasons": reasons,
+            "risk_amount": round(risk_amount, 2),
+            "reward_amount": round(risk_amount * 3, 2),
+            "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        }
+        SIGNAL_HISTORY.append(result)
+        return result, data['df']
+    return None, data['df']
 
 # UI
 
@@ -222,20 +229,26 @@ if STREAMLIT_AVAILABLE:
         if st.button("🔍 Generate Signal"):
             data = get_live_data((exch, sym))
             if data:
-                signal = generate_signal(data, balance)
-                st.subheader("Signal")
-                st.markdown(f"- Signal: `{signal['signal']}`")
-                st.markdown(f"- Entry: **{signal['entry']}**")
-                st.markdown(f"- Stop Loss: **{signal['stop_loss']}**")
-                st.markdown(f"- Take Profit: **{signal['take_profit']}**")
-                st.markdown(f"- Confidence: **{signal['confidence']}%**")
-                st.progress(signal['confidence'])
-                st.markdown(f"- 💸 Risk: ${signal['risk_amount']} | 🟢 Reward: ${signal['reward_amount']}")
-                st.markdown(f"- Reason: {' | '.join(signal['reasons'])}")
+                signal, df = generate_signal(data, balance)
+                if signal:
+                    st.subheader("Signal")
+                    st.markdown(f"- Signal: `{signal['signal']}`")
+                    st.markdown(f"- Entry: **{signal['entry']}** | SL: **{signal['stop_loss']}** | TP: **{signal['take_profit']}**")
+                    st.markdown(f"- Confidence: **{signal['confidence']}%**")
+                    st.markdown(f"- Trend: `{signal['trend']}` | Momentum: `{signal['momentum']}` | Breakout: `{signal['breakout']}`")
+                    st.progress(signal['confidence'])
+
+                    # Plotting chart with Entry, SL, TP
+                    plot = go.Figure()
+                    plot.add_trace(go.Candlestick(x=df.index, open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='Price'))
+                    plot.add_hline(y=signal['entry'], line_color="blue", annotation_text="Entry")
+                    plot.add_hline(y=signal['stop_loss'], line_color="red", annotation_text="SL")
+                    plot.add_hline(y=signal['take_profit'], line_color="green", annotation_text="TP")
+                    st.plotly_chart(plot, use_container_width=True)
 
         st.markdown("---")
         if SIGNAL_HISTORY:
-            st.subheader("📜 Signal History")
+            st.subheader("📜 Signal History (Buy/Sell Only)")
             df_hist = pd.DataFrame(SIGNAL_HISTORY)
             st.dataframe(df_hist[::-1], use_container_width=True)
 
