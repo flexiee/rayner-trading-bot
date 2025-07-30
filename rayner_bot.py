@@ -101,10 +101,16 @@ def fetch_market_data(market_type, symbol, interval='1h'):
 def get_top_movers(market_type, symbols, interval="1h"):
     movers = []
     for sym in symbols:
-        df = fetch_market_data(market_type, sym, interval)
-        if df is not None and not df.empty:
-            pct = (df['close'].iloc[-1] - df['open'].iloc[0]) / df['open'].iloc[0] * 100
-            movers.append((sym, round(pct, 2)))
+        try:
+            df = fetch_market_data(market_type, sym, interval)
+            if df is not None and not df.empty:
+                open_price = df['open'].iloc[0]
+                close_price = df['close'].iloc[-1]
+                if isinstance(open_price, (float, int)) and isinstance(close_price, (float, int)):
+                    pct = (close_price - open_price) / open_price * 100
+                    movers.append((sym, round(pct, 2)))
+        except Exception as e:
+            print(f"Error processing {sym}: {e}")
     movers.sort(key=lambda x: abs(x[1]), reverse=True)
     return movers[:5]
 
