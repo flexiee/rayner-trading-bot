@@ -215,4 +215,65 @@ def calculate_avg_rr():
     rrs = [s['reward_amount'] / s['risk_amount'] for s in SIGNAL_HISTORY if s['risk_amount'] > 0]
     return round(np.mean(rrs), 2) if rrs else 0.0
 
-# UI Logic continues below (unchanged)
+# === STREAMLIT UI ===
+if STREAMLIT_AVAILABLE:
+    st.title("📈 Universal Trading Bot")
+    account_balance = st.number_input("Account Balance ($)", value=1000.0)
+
+    category = st.selectbox("Select Category", list(CATEGORIES.keys()))
+    market = st.selectbox("Select Market", CATEGORIES[category])
+    active_sessions = get_active_sessions()
+    st.markdown(f"**🕒 Active Sessions:** {', '.join(active_sessions)}")
+    top_markets = get_top_moving_markets()
+    st.markdown("**🔥 Top Moving Markets:**")
+    for m, v in top_markets:
+        st.write(f"{m}: {v}")
+
+    st.markdown("---")
+
+    with st.spinner("Fetching real-time data..."):
+        info = get_live_data(MARKET_SYMBOLS[market])
+        if info:
+            signal, df = generate_signal(info, account_balance)
+
+            fig = go.Figure()
+            fig.add_trace(go.Candlestick(
+                x=df.index,
+                open=df['open'],
+                high=df['high'],
+                low=df['low'],
+                close=df['close'],
+                name="Candles"
+            ))
+            if signal:
+                fig.add_hline(y=signal["entry"], line_color="blue", annotation_text="Entry", line_dash="dash")
+                fig.add_hline(y=signal["stop_loss"], line_color="red", annotation_text="SL", line_dash="dot")
+                fig.add_hline(y=signal["take_profit"], line_color="green", annotation_text="TP", line_dash="dot")
+            fig.update_layout(height=500)
+            st.plotly_chart(fig, use_container_width=True)
+
+            if signal:
+                st.subheader(f"📢 Signal: {signal['signal']}")
+                st.write(f"**Entry:** {signal['entry']}")
+                st.write(f"**Stop Loss:** {signal['stop_loss']}")
+                st.write(f"**Take Profit:** {signal['take_profit']}")
+                st.write(f"**Trend:** {signal['trend']}")
+                st.write(f"**Momentum:** {signal['momentum']}")
+                st.write(f"**Confidence:** {signal['confidence']}%")
+                st.write(f"**Result (Simulated):** {signal['result']}")
+                st.write(f"**Reasons:** {', '.join(signal['reasons'])}")
+            else:
+                st.info("No trade signal at the moment. Waiting for valid breakout and trend alignment.")
+
+            st.markdown("---")
+            st.subheader("📊 Performance Metrics")
+            st.write(f"**Win Rate:** {calculate_win_rate()}%")
+            st.write(f"**Avg Risk/Reward:** {calculate_avg_rr()}")
+
+            if SIGNAL_HISTORY:
+                st.markdown("---")
+                st.subheader("📜 Signal History")
+                st.dataframe(pd.DataFrame(SIGNAL_HISTORY[::-1]))
+
+        else:
+            st.error("⚠️ Could not fetch live data. Please try again later.")
