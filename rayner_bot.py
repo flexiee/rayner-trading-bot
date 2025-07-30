@@ -14,9 +14,12 @@ import yfinance as yf
 # =============================
 def calculate_ema(prices, period):
     prices = pd.Series(prices).squeeze()
+    if len(prices.shape) > 1:
+        prices = prices.iloc[:, 0]  # flatten if needed
     return prices.ewm(span=period, adjust=False).mean().values
 
 def calculate_rsi(prices, period=14):
+    prices = np.asarray(prices).flatten()
     delta = np.diff(prices)
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -32,6 +35,9 @@ def calculate_rsi(prices, period=14):
     return rsi
 
 def calculate_atr(high, low, close, period=14):
+    high = np.asarray(high).flatten()
+    low = np.asarray(low).flatten()
+    close = np.asarray(close).flatten()
     tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
     atr = np.zeros_like(close)
     atr[period] = np.mean(tr[:period])
@@ -107,7 +113,7 @@ def get_top_movers(market_type, symbols, interval="1h"):
             if df is not None and not df.empty:
                 open_price = df['open'].iloc[0]
                 close_price = df['close'].iloc[-1]
-                if isinstance(open_price, (float, int)) and isinstance(close_price, (float, int)):
+                if isinstance(open_price, (float, int, np.float64)) and isinstance(close_price, (float, int, np.float64)):
                     pct = (close_price - open_price) / open_price * 100
                     movers.append((sym, round(pct, 2)))
         except Exception as e:
@@ -161,7 +167,7 @@ def main():
         st.dataframe(trade_log.tail(10).style.format({'close': '${:.2f}', 'entry_price': '${:.2f}'}))
 
         st.subheader("📊 Live Chart")
-        tv_symbol = symbol.replace("/", "") if market_type == "Forex" else symbol.replace("/", "") if market_type == "Crypto" else symbol
+        tv_symbol = symbol.replace("/", "") if market_type in ["Forex", "Crypto"] else symbol
         st.components.v1.iframe(f"https://s.tradingview.com/widgetembed/?frameElementId=tradingview_{tv_symbol}&symbol={tv_symbol}&interval=60&hidesidetoolbar=1&symboledit=1&saveimage=1&toolbarbg=f1f3f6&studies=[]&theme=dark&style=1&timezone=Etc%2FUTC", height=500)
 
 if __name__ == '__main__':
