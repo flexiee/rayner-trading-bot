@@ -1,8 +1,17 @@
-import base64
+import sys
 from datetime import datetime
-import streamlit as st
-from tvDatafeed import TvDatafeed, Interval
-import pandas as pd
+
+try:
+    import streamlit as st
+    from streamlit.components.v1 import iframe
+    STREAMLIT_AVAILABLE = True
+except ImportError:
+    STREAMLIT_AVAILABLE = False
+
+try:
+    from tvDatafeed import TvDatafeed, Interval
+except ImportError:
+    sys.exit("Please install tvDatafeed: pip install git+https://github.com/rongardF/tvdatafeed.git")
 
 tv = TvDatafeed()
 
@@ -18,7 +27,7 @@ MARKET_SYMBOLS = {
     "Silver": ("OANDA", "XAGUSD"),
     "Oil WTI": ("OANDA", "WTICOUSD"),
     "NIFTY 50": ("NSE", "NIFTY"),
-    "BANKNIFTY": ("NSE", "BANKNIFTY"),
+    "BANKNIFTY": ("NSE", "BANKNIFTY")
 }
 
 CATEGORIES = {
@@ -28,11 +37,8 @@ CATEGORIES = {
     "Indices": ["NIFTY 50", "BANKNIFTY"]
 }
 
-def get_encoded_image():
-    image_base64 = '''
-    iVBORw0KGgoAAAANSUhEUgAAA...<TRIMMED FOR SPACE>...AAAElFTkSuQmCC
-    '''  # Replace this with actual base64 from 13812.png
-    return image_base64.strip()
+# Base64-encoded image (13812.png) as background
+BACKGROUND_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAyAAAAHCCAIAAACYATqfAADjMUlEQVR4nOzdZVwU3fsw8JnZpRtESkApFRBssRO9VWxFsbsDsW67'  # truncated for brevity
 
 def get_live_data(symbol_info):
     exchange, symbol = symbol_info
@@ -55,8 +61,7 @@ def get_live_data(symbol_info):
         "resistance": resistance,
         "momentum": momentum,
         "volatility": volatility,
-        "signal_strength": min(100, max(10, volatility)),
-        "change": price - prev_price
+        "signal_strength": min(120, max(10, volatility))
     }
 
 def generate_signal(data, account_balance):
@@ -81,8 +86,6 @@ def generate_signal(data, account_balance):
             signal = "SELL"
             reasons.append("Strong downtrend breakout")
 
-    lot_size = round(risk_amount / abs(entry - sl), 2) if sl else 0
-
     return {
         "signal": signal,
         "entry": round(entry, 5),
@@ -91,99 +94,110 @@ def generate_signal(data, account_balance):
         "confidence": data["signal_strength"],
         "reasons": reasons,
         "risk_amount": round(risk_amount, 2),
-        "reward_amount": round(risk_amount * 3, 2),
-        "lot_size": lot_size
+        "reward_amount": round(risk_amount * 3, 2)
     }
 
-def run_ui():
-    st.set_page_config(layout="wide", page_title="📈 Pro Trading Bot")
+def scan_high_rr_markets(account_balance):
+    high_rr_alerts = []
+    for market, symbol_info in MARKET_SYMBOLS.items():
+        data = get_live_data(symbol_info)
+        if data and data["signal_strength"] >= 110:
+            signal = generate_signal(data, account_balance)
+            if signal["stop_loss"] and signal["take_profit"]:
+                rr_ratio = abs((signal["take_profit"] - signal["entry"]) / (signal["entry"] - signal["stop_loss"]))
+                if rr_ratio >= 6:
+                    high_rr_alerts.append({
+                        "market": market,
+                        "signal": signal["signal"],
+                        "rr": round(rr_ratio, 2),
+                        "confidence": signal["confidence"]
+                    })
+    return high_rr_alerts
 
-    bg = get_encoded_image()
-    st.markdown(f"""
+if STREAMLIT_AVAILABLE:
+    def run_ui():
+        st.set_page_config(layout="wide", page_title="📊 Rayner Pro Bot")
+
+        st.markdown(f"""
         <style>
         .stApp {{
-            background-image: url("data:image/png;base64,{bg}");
+            background-image: url("data:image/png;base64,{BACKGROUND_BASE64}");
             background-size: cover;
-            background-position: center;
+            background-repeat: no-repeat;
             background-attachment: fixed;
             color: white;
         }}
         </style>
-    """, unsafe_allow_html=True)
+        """, unsafe_allow_html=True)
 
-    st.title("📈 Pro Trading Bot")
-    if "favorites" not in st.session_state:
-        st.session_state.favorites = []
-    if "selected_market" not in st.session_state:
-        st.session_state.selected_market = "EUR/USD"
+        st.title("📊 Rayner Pro Trading Bot")
 
-    # Account balance
-    account_balance = st.sidebar.number_input("Account Balance ($)", value=1000, min_value=10)
+        if "favorites" not in st.session_state:
+            st.session_state.favorites = []
+        if "selected_market" not in st.session_state:
+            st.session_state.selected_market = "EUR/USD"
 
-    # High movement
-    movement_scores = {}
-    for market, info in MARKET_SYMBOLS.items():
-        data = get_live_data(info)
-        if data:
-            movement_scores[market] = abs(data["change"])
+        account_balance = st.sidebar.number_input("💰 Account Balance ($)", min_value=10, value=1000)
 
-    high_movement = sorted(movement_scores.items(), key=lambda x: x[1], reverse=True)[:3]
-    st.sidebar.subheader("🔥 High Movement Markets")
-    for market, delta in high_movement:
-        st.sidebar.write(f"{market}: {round(delta, 5)}")
+        st.sidebar.subheader("⭐ Favorite Markets")
+        for fav in st.session_state.favorites:
+            exch, sym = MARKET_SYMBOLS[fav]
+            df = tv.get_hist(sym, exch, Interval.in_1_minute, n_bars=1)
+            if df is not None and not df.empty:
+                price = df.iloc[-1]["close"]
+                st.sidebar.markdown(f"✔️ {fav}: {round(price, 5)}")
 
-    # Watchlist
-    st.sidebar.subheader("⭐ Watchlist")
-    for fav in st.session_state.favorites:
-        exch, sym = MARKET_SYMBOLS[fav]
-        df = tv.get_hist(sym, exch, Interval.in_1_minute, n_bars=1)
-        if df is not None and not df.empty:
-            price = df.iloc[-1]["close"]
-            st.sidebar.markdown(f"**{fav}**: {round(price, 5)}")
+        st.sidebar.markdown("---")
+        category = st.sidebar.selectbox("Market Category", list(CATEGORIES.keys()))
+        for market in CATEGORIES[category]:
+            col1, col2 = st.columns([8, 1])
+            if col1.button(market):
+                st.session_state.selected_market = market
+            if col2.button("⭐" if market in st.session_state.favorites else "☆", key=f"fav_{market}"):
+                if market in st.session_state.favorites:
+                    st.session_state.favorites.remove(market)
+                else:
+                    st.session_state.favorites.append(market)
 
-    # Category picker
-    st.sidebar.subheader("📂 Market Categories")
-    category = st.sidebar.selectbox("Choose Category", list(CATEGORIES.keys()))
-    for market in CATEGORIES[category]:
-        col1, col2 = st.columns([8, 1])
-        if col1.button(market):
-            st.session_state.selected_market = market
-        if col2.button("⭐" if market in st.session_state.favorites else "☆", key=market):
-            if market in st.session_state.favorites:
-                st.session_state.favorites.remove(market)
+        st.markdown("---")
+        st.subheader(f"📈 {st.session_state.selected_market} Chart")
+        exch, sym = MARKET_SYMBOLS[st.session_state.selected_market]
+        iframe(f"https://s.tradingview.com/widgetembed/?symbol={exch}:{sym}&interval=1&theme=dark", height=400)
+
+        if st.button("🔄 Refresh Signal"):
+            data = get_live_data((exch, sym))
+            if data:
+                signal = generate_signal(data, account_balance)
+
+                st ​:contentReference[oaicite:0]{index=0}​
+                st.subheader("📌 Market Snapshot")
+                st.markdown(f"- Trend: **{data['trend']}**")
+                st.markdown(f"- Momentum: **{data['momentum']}**")
+                st.markdown(f"- Volatility: **{data['volatility']}**")
+                st.markdown(f"- Support: **{data['support']}**")
+                st.markdown(f"- Resistance: **{data['resistance']}**")
+
+                st.subheader("✅ Signal Result")
+                st.markdown(f"- Signal: `{signal['signal']}`")
+                st.markdown(f"- Confidence: **{signal['confidence']}%**")
+                st.progress(min(signal['confidence'], 100))
+
+                st.markdown(f"- Entry Price: **{signal['entry']}**")
+                st.markdown(f"- Stop Loss: **{signal['stop_loss']}**  |  Take Profit: **{signal['take_profit']}**")
+                st.markdown(f"- 💸 Risk: `${signal['risk_amount']}` | 🟢 Reward: `${signal['reward_amount']}`")
+
+                if signal['reasons']:
+                    st.markdown(f"**Reason:** {' | '.join(signal['reasons'])}")
+                st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             else:
-                st.session_state.favorites.append(market)
+                st.error("❌ Failed to fetch live data.")
 
-    # Display Market
-    selected = st.session_state.selected_market
-    exch, sym = MARKET_SYMBOLS[selected]
-    st.subheader(f"📊 {selected} Live Market")
-    st.components.v1.iframe(f"https://s.tradingview.com/widgetembed/?symbol={exch}:{sym}&interval=1&theme=dark", height=400)
+        # Pop-up high R:R alerts
+        alerts = scan_high_rr_markets(account_balance)
+        for alert in alerts:
+            st.toast(f"🚨 {alert['market']} signal `{alert['signal']}` R:R {alert['rr']} at {alert['confidence']}% confidence", icon="⚡")
 
-    # Manual refresh
-    if st.button("🔄 Refresh Signal"):
-        data = get_live_data((exch, sym))
-        if data:
-            signal = generate_signal(data, account_balance)
-            st.subheader("📌 Market Snapshot")
-            st.write(f"Trend: {data['trend']}")
-            st.write(f"Momentum: {data['momentum']}")
-            st.write(f"Volatility: {data['volatility']}")
-            st.write(f"Support: {data['support']}")
-            st.write(f"Resistance: {data['resistance']}")
-
-            st.subheader("✅ Signal Result")
-            st.write(f"Signal: {signal['signal']}")
-            st.progress(signal["confidence"])
-            st.write(f"Entry: {signal['entry']} | SL: {signal['stop_loss']} | TP: {signal['take_profit']}")
-            st.write(f"Risk: ${signal['risk_amount']} | Reward: ${signal['reward_amount']}")
-            st.write(f"Recommended Lot Size: {signal['lot_size']}")
-            st.caption(f"Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
-            if data['volatility'] > 100:
-                st.warning("⚠️ Huge movement detected!")
-        else:
-            st.error("Unable to fetch data.")
-
-if __name__ == "__main__":
-    run_ui()
+    if __name__ == "__main__":
+        run_ui()
+else:
+    print("Streamlit not installed.")
