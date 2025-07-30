@@ -1,17 +1,94 @@
 # =============================
-# UNIVERSAL TRADING BOT (REAL-TIME, MULTI-MARKET)
+# UNIVERSAL TRADING BOT (REAL-TIME, MULTI-MARKET) with Full Trader Strategies
 # =============================
 
-import streamlit as st
+import sys
+from datetime import datetime
+import pytz
 import pandas as pd
 import numpy as np
 import time
-from datetime import datetime, timedelta
-import yfinance as yf
 
-# =============================
-# TECHNICAL INDICATORS
-# =============================
+try:
+    import streamlit as st
+    from streamlit.components.v1 import iframe
+    STREAMLIT_AVAILABLE = True
+except ImportError:
+    STREAMLIT_AVAILABLE = False
+
+try:
+    from tvDatafeed import TvDatafeed, Interval
+except ImportError:
+    sys.exit("Please install tvDatafeed: pip install git+https://github.com/rongardF/tvdatafeed.git")
+
+# Initialize
+if STREAMLIT_AVAILABLE:
+    st.set_page_config(layout="wide", page_title="Universal Trading Bot")
+
+# Login to TradingView
+tv = TvDatafeed()
+
+# Market Mapping
+MARKET_SYMBOLS = {
+    "EUR/USD": ("OANDA", "EURUSD"),
+    "GBP/JPY": ("OANDA", "GBPJPY"),
+    "USD/JPY": ("OANDA", "USDJPY"),
+    "AUD/USD": ("OANDA", "AUDUSD"),
+    "XAU/USD": ("OANDA", "XAUUSD"),
+    "BTC/USD": ("BINANCE", "BTCUSDT"),
+    "ETH/USD": ("BINANCE", "ETHUSDT"),
+    "Gold": ("OANDA", "XAUUSD"),
+    "Silver": ("OANDA", "XAGUSD"),
+    "Oil WTI": ("OANDA", "WTICOUSD"),
+    "NIFTY 50": ("NSE", "NIFTY"),
+    "BANKNIFTY": ("NSE", "BANKNIFTY"),
+}
+
+CATEGORIES = {
+    "Forex": ["EUR/USD", "GBP/JPY", "USD/JPY", "AUD/USD", "XAU/USD"],
+    "Crypto": ["BTC/USD", "ETH/USD"],
+    "Commodities": ["Gold", "Silver", "Oil WTI"],
+    "Indices": ["NIFTY 50", "BANKNIFTY"]
+}
+
+SESSIONS = {
+    "London (Forex)": {"start": 8, "end": 17, "timezone": "Europe/London"},
+    "New York (US)": {"start": 8, "end": 17, "timezone": "America/New_York"},
+    "Tokyo (Asia)": {"start": 9, "end": 16, "timezone": "Asia/Tokyo"},
+    "Sydney (Pacific)": {"start": 9, "end": 17, "timezone": "Australia/Sydney"},
+    "Crypto Peak (UTC)": {"start": 12, "end": 21, "timezone": "UTC"},
+}
+
+# Session detection
+
+def get_active_sessions():
+    now_utc = datetime.utcnow().replace(tzinfo=pytz.utc)
+    active = []
+    for name, info in SESSIONS.items():
+        tz = pytz.timezone(info["timezone"])
+        local = now_utc.astimezone(tz)
+        if info["start"] <= local.hour < info["end"]:
+            active.append(name)
+    return active
+
+# Volatility ranking
+
+def get_top_moving_markets():
+    market_vols = []
+    for name, (exchange, symbol) in MARKET_SYMBOLS.items():
+        try:
+            df = tv.get_hist(symbol, exchange, interval=Interval.in_1_minute, n_bars=20)
+            if df is not None and not df.empty:
+                std_dev = df['high'].std()
+                volatility = round(std_dev * 10000, 2)
+                market_vols.append((name, volatility))
+        except Exception:
+            continue
+    sorted_markets = sorted(market_vols, key=lambda x: x[1], reverse=True)
+    return sorted_markets[:3]
+
+# Indicators
+
 def calculate_ema(prices, period):
     prices = np.asarray(prices).flatten()
     return pd.Series(prices).ewm(span=period, adjust=False).mean().values
@@ -32,17 +109,6 @@ def calculate_rsi(prices, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
-def calculate_atr(high, low, close, period=14):
-    high = np.asarray(high).flatten()
-    low = np.asarray(low).flatten()
-    close = np.asarray(close).flatten()
-    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
-    atr = np.zeros_like(close)
-    atr[period] = np.mean(tr[:period])
-    for i in range(period + 1, len(close)):
-        atr[i] = (atr[i - 1] * (period - 1) + tr[i - 1]) / period
-    return atr
-
 def calculate_macd(prices, fast=12, slow=26, signal=9):
     prices = np.asarray(prices).flatten()
     ema_fast = pd.Series(prices).ewm(span=fast, adjust=False).mean()
@@ -52,93 +118,119 @@ def calculate_macd(prices, fast=12, slow=26, signal=9):
     histogram = macd - signal_line
     return macd, signal_line, histogram
 
-# =============================
-# STRATEGY ENGINE
-# =============================
-def enhanced_rr_strategy(df, risk_percent=1.0, min_vol=1.5):
-    df['close'] = df['close'].astype(float)
-    df['high'] = df['high'].astype(float)
-    df['low'] = df['low'].astype(float)
-    df['volume'] = df['volume'].astype(float)
+def calculate_atr(high, low, close, period=14):
+    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
+    atr = np.zeros_like(close)
+    atr[period] = np.mean(tr[:period])
+    for i in range(period + 1, len(close)):
+        atr[i] = (atr[i - 1] * (period - 1) + tr[i - 1]) / period
+    return atr
 
+# Live Data & Strategy
+
+def get_live_data(symbol_info):
+    exchange, symbol = symbol_info
+    df = tv.get_hist(symbol=symbol, exchange=exchange, interval=Interval.in_1_minute, n_bars=100)
+    if df is None or df.empty:
+        return None
     df['ema_20'] = calculate_ema(df['close'], 20)
     df['ema_50'] = calculate_ema(df['close'], 50)
     df['rsi'] = calculate_rsi(df['close'])
-    df['atr'] = calculate_atr(df['high'], df['low'], df['close'])
     df['macd'], df['macd_signal'], df['macd_hist'] = calculate_macd(df['close'])
+    df['atr'] = calculate_atr(df['high'].values, df['low'].values, df['close'].values)
+    df['breakout'] = df['close'] > df['close'].rolling(window=20).max().shift(1)
 
-    # Jesse Livermore-style breakout: price makes new high
-    df['rolling_high'] = df['high'].rolling(20).max()
-    breakout_condition = df['close'] > df['rolling_high'].shift(1)
+    last = df.iloc[-1]
+    trend = "uptrend" if last['ema_20'] > last['ema_50'] else "downtrend"
+    momentum = "strong" if last['macd'] > last['macd_signal'] else "weak"
+    volatility = round(df['high'].std() * 10000)
+    signal_strength = min(100, max(10, volatility))
 
-    df['volume_ma'] = df['volume'].rolling(20).mean().fillna(0)
-    volume_condition = df['volume'] > df['volume_ma'] * 1.2
-    trend_condition = df['ema_20'] > df['ema_50']
-    rsi_condition = (df['rsi'] > 45) & (df['rsi'] < 65) & (df['rsi'].diff() > 0)
-    macd_condition = df['macd'] > df['macd_signal']
-    movement_condition = (df['atr'] / df['close']) * 100 > min_vol
+    return {
+        "price": round(last['close'], 5),
+        "trend": trend,
+        "momentum": momentum,
+        "support": round(df['low'].min(), 5),
+        "resistance": round(df['high'].max(), 5),
+        "volatility": volatility,
+        "signal_strength": signal_strength,
+        "breakout": bool(last['breakout']),
+        "atr": last['atr']
+    }
 
-    df['entry_signal'] = trend_condition & rsi_condition & macd_condition & volume_condition & movement_condition & breakout_condition
-    df['recent_low'] = df['low'].rolling(5).min()
-    df['stop_loss'] = df['recent_low'] - (df['atr'] * 1.5)
-    df['risk_distance'] = df['close'] - df['stop_loss']
-    df['tp_1'] = df['close'] + df['risk_distance'] * 1.618
-    df['tp_2'] = df['close'] + df['risk_distance'] * 2.618
-    df['tp_3'] = df['close'] + df['risk_distance'] * 4.236
-    df['position_size'] = (risk_percent / 100) / (df['risk_distance'] / df['close'])
+# Signal Logic
 
-    df['entry_price'] = df['close'].where(df['entry_signal'])
-    df['trade_result'] = np.nan
-    for i in range(len(df) - 5):
-        if df['entry_signal'].iloc[i]:
-            future = df['close'].iloc[i + 1:i + 6]
-            if (future >= df['tp_1'].iloc[i]).any():
-                df.at[df.index[i], 'trade_result'] = 'TP Hit ✅'
-            elif (future <= df['stop_loss'].iloc[i]).any():
-                df.at[df.index[i], 'trade_result'] = 'SL Hit ❌'
+def generate_signal(data, account_balance):
+    entry = data["price"]
+    risk_amount = account_balance * 0.01
+    atr = data['atr']
+    sl = entry - atr if data["trend"] == "uptrend" else entry + atr
+    tp = entry + (atr * 3) if data["trend"] == "uptrend" else entry - (atr * 3)
+    signal = "WAIT"
+    reasons = []
+
+    if data['breakout'] and data['momentum'] == 'strong':
+        signal = "BUY" if data["trend"] == "uptrend" else "SELL"
+        reasons.append("Breakout with trend and momentum alignment")
+
+    return {
+        "signal": signal,
+        "entry": round(entry, 5),
+        "stop_loss": round(sl, 5),
+        "take_profit": round(tp, 5),
+        "confidence": data["signal_strength"],
+        "reasons": reasons,
+        "risk_amount": round(risk_amount, 2),
+        "reward_amount": round(risk_amount * 3, 2)
+    }
+
+# UI
+
+if STREAMLIT_AVAILABLE:
+    def run_ui():
+        st.title("Universal Trading Bot")
+
+        active = get_active_sessions()
+        if active:
+            st.markdown("### 🌍 Active Sessions")
+            for s in active:
+                st.markdown(f"- ✅ {s}")
+
+        movers = get_top_moving_markets()
+        if movers:
+            st.markdown("### 🔥 Top Movers")
+            for m, v in movers:
+                st.markdown(f"- {m}: {v}")
+
+        st.sidebar.header("📌 Select Market")
+        category = st.sidebar.selectbox("Category", list(CATEGORIES.keys()))
+        selected = st.sidebar.radio("Market", CATEGORIES[category])
+        st.session_state.selected_market = selected
+
+        st.subheader(f"📈 Live Chart: {selected}")
+        exch, sym = MARKET_SYMBOLS[selected]
+        iframe(f"https://s.tradingview.com/widgetembed/?symbol={exch}:{sym}&interval=1&theme=dark", height=400)
+
+        st.markdown("---")
+        balance = st.number_input("💰 Account Balance", value=1000, min_value=10)
+
+        if st.button("🔍 Generate Signal"):
+            data = get_live_data((exch, sym))
+            if data:
+                signal = generate_signal(data, balance)
+                st.subheader("Signal")
+                st.markdown(f"- Signal: `{signal['signal']}`")
+                st.markdown(f"- Entry: **{signal['entry']}**")
+                st.markdown(f"- Stop Loss: **{signal['stop_loss']}**")
+                st.markdown(f"- Take Profit: **{signal['take_profit']}**")
+                st.markdown(f"- Confidence: **{signal['confidence']}%**")
+                st.progress(signal['confidence'])
+                st.markdown(f"- 💸 Risk: ${signal['risk_amount']} | 🟢 Reward: ${signal['reward_amount']}")
+                st.markdown(f"- Reason: {' | '.join(signal['reasons'])}")
             else:
-                df.at[df.index[i], 'trade_result'] = 'Open 🟡'
-    return df
+                st.error("No data available.")
 
-# =============================
-# STREAMLIT UI + DATA FETCHING
-# =============================
-st.set_page_config(layout="wide")
-st.title("📈 Universal Trading Bot (Live Market Signals)")
-
-markets = {
-    'BTC/USD': 'BTC-USD',
-    'ETH/USD': 'ETH-USD',
-    'Gold (XAU)': 'GC=F',
-    'Apple': 'AAPL',
-    'Nifty 50': '^NSEI',
-    'Tesla': 'TSLA',
-    'Crude Oil': 'CL=F'
-}
-
-selected_market = st.selectbox("Select Market", list(markets.keys()))
-ticker = markets[selected_market]
-
-st.components.v1.iframe(
-    f"https://www.tradingview.com/widgetembed/?symbol={ticker}&interval=1&theme=dark",
-    height=400
-)
-
-if st.button("🚀 Generate Signal"):
-    end = datetime.now()
-    start = end - timedelta(days=90)
-    df = yf.download(ticker, start=start, end=end, interval="1h")
-    df = enhanced_rr_strategy(df)
-
-    if df['entry_signal'].iloc[-1]:
-        st.success(f"✅ Signal Generated for {selected_market}")
-        st.metric("Entry Price", round(df['entry_price'].iloc[-1], 2))
-        st.metric("Stop Loss", round(df['stop_loss'].iloc[-1], 2))
-        st.metric("Take Profit (TP1)", round(df['tp_1'].iloc[-1], 2))
-        st.metric("Position Size", round(df['position_size'].iloc[-1], 2))
-    else:
-        st.warning(f"No valid entry signal for {selected_market}")
-
-    st.subheader("📜 Trade History")
-    trade_df = df.dropna(subset=['entry_price', 'trade_result'])
-    st.dataframe(trade_df[['entry_price', 'stop_loss', 'tp_1', 'tp_2', 'tp_3', 'trade_result']].tail(10))
+    if __name__ == "__main__":
+        run_ui()
+else:
+    print("Streamlit not installed.")
