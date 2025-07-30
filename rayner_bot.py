@@ -43,22 +43,42 @@ def calculate_atr(high, low, close, period=14):
         atr[i] = (atr[i - 1] * (period - 1) + tr[i - 1]) / period
     return atr
 
+def calculate_macd(prices, fast=12, slow=26, signal=9):
+    prices = np.asarray(prices).flatten()
+    ema_fast = pd.Series(prices).ewm(span=fast, adjust=False).mean()
+    ema_slow = pd.Series(prices).ewm(span=slow, adjust=False).mean()
+    macd = ema_fast - ema_slow
+    signal_line = macd.ewm(span=signal, adjust=False).mean()
+    histogram = macd - signal_line
+    return macd, signal_line, histogram
+
 # =============================
 # STRATEGY ENGINE
 # =============================
 def enhanced_rr_strategy(df, risk_percent=1.0, min_vol=1.5):
-    df['ema_20'] = calculate_ema(df['close'].values, 20)
-    df['ema_50'] = calculate_ema(df['close'].values, 50)
-    df['rsi'] = calculate_rsi(df['close'].values)
-    df['atr'] = calculate_atr(df['high'].values, df['low'].values, df['close'].values)
+    df['close'] = df['close'].astype(float)
+    df['high'] = df['high'].astype(float)
+    df['low'] = df['low'].astype(float)
+    df['volume'] = df['volume'].astype(float)
+
+    df['ema_20'] = calculate_ema(df['close'], 20)
+    df['ema_50'] = calculate_ema(df['close'], 50)
+    df['rsi'] = calculate_rsi(df['close'])
+    df['atr'] = calculate_atr(df['high'], df['low'], df['close'])
+    df['macd'], df['macd_signal'], df['macd_hist'] = calculate_macd(df['close'])
+
+    # Jesse Livermore-style breakout: price makes new high
+    df['rolling_high'] = df['high'].rolling(20).max()
+    breakout_condition = df['close'] > df['rolling_high'].shift(1)
 
     df['volume_ma'] = df['volume'].rolling(20).mean().fillna(0)
     volume_condition = df['volume'] > df['volume_ma'] * 1.2
     trend_condition = df['ema_20'] > df['ema_50']
     rsi_condition = (df['rsi'] > 45) & (df['rsi'] < 65) & (df['rsi'].diff() > 0)
+    macd_condition = df['macd'] > df['macd_signal']
     movement_condition = (df['atr'] / df['close']) * 100 > min_vol
 
-    df['entry_signal'] = trend_condition & rsi_condition & volume_condition & movement_condition
+    df['entry_signal'] = trend_condition & rsi_condition & macd_condition & volume_condition & movement_condition & breakout_condition
     df['recent_low'] = df['low'].rolling(5).min()
     df['stop_loss'] = df['recent_low'] - (df['atr'] * 1.5)
     df['risk_distance'] = df['close'] - df['stop_loss']
@@ -81,92 +101,44 @@ def enhanced_rr_strategy(df, risk_percent=1.0, min_vol=1.5):
     return df
 
 # =============================
-# DATA FETCHING
+# STREAMLIT UI + DATA FETCHING
 # =============================
-def fetch_market_data(market_type, symbol, interval='1h'):
+st.set_page_config(layout="wide")
+st.title("📈 Universal Trading Bot (Live Market Signals)")
+
+markets = {
+    'BTC/USD': 'BTC-USD',
+    'ETH/USD': 'ETH-USD',
+    'Gold (XAU)': 'GC=F',
+    'Apple': 'AAPL',
+    'Nifty 50': '^NSEI',
+    'Tesla': 'TSLA',
+    'Crude Oil': 'CL=F'
+}
+
+selected_market = st.selectbox("Select Market", list(markets.keys()))
+ticker = markets[selected_market]
+
+st.components.v1.iframe(
+    f"https://www.tradingview.com/widgetembed/?symbol={ticker}&interval=1&theme=dark",
+    height=400
+)
+
+if st.button("🚀 Generate Signal"):
     end = datetime.now()
-    start = end - timedelta(days=15)
-    if market_type == "Crypto":
-        symbol = symbol.replace("/", "-")
-    elif market_type == "Forex":
-        symbol = symbol.replace("/", "") + "=X"
-    elif market_type == "Commodities":
-        mapping = {"Gold": "GC=F", "Silver": "SI=F", "Oil": "CL=F", "Natural Gas": "NG=F", "Copper": "HG=F"}
-        symbol = mapping.get(symbol, symbol)
-    elif market_type == "Indices":
-        mapping = {"S&P 500": "^GSPC", "NASDAQ": "^IXIC", "Dow Jones": "^DJI", "FTSE 100": "^FTSE", "DAX": "^GDAXI"}
-        symbol = mapping.get(symbol, symbol)
-    df = yf.download(symbol, start=start, end=end, interval=interval)
-    df = df.rename(columns=str.lower)
-    return df
+    start = end - timedelta(days=90)
+    df = yf.download(ticker, start=start, end=end, interval="1h")
+    df = enhanced_rr_strategy(df)
 
-# =============================
-# TOP MOVERS
-# =============================
-def get_top_movers(market_type, symbols, interval="1h"):
-    movers = []
-    for sym in symbols:
-        try:
-            df = fetch_market_data(market_type, sym, interval)
-            if df is not None and not df.empty:
-                open_price = df['open'].iloc[0]
-                close_price = df['close'].iloc[-1]
-                if isinstance(open_price, (float, int, np.float64)) and isinstance(close_price, (float, int, np.float64)):
-                    pct = (close_price - open_price) / open_price * 100
-                    movers.append((sym, round(pct, 2)))
-        except Exception as e:
-            print(f"Error processing {sym}: {e}")
-    movers.sort(key=lambda x: abs(x[1]), reverse=True)
-    return movers[:5]
+    if df['entry_signal'].iloc[-1]:
+        st.success(f"✅ Signal Generated for {selected_market}")
+        st.metric("Entry Price", round(df['entry_price'].iloc[-1], 2))
+        st.metric("Stop Loss", round(df['stop_loss'].iloc[-1], 2))
+        st.metric("Take Profit (TP1)", round(df['tp_1'].iloc[-1], 2))
+        st.metric("Position Size", round(df['position_size'].iloc[-1], 2))
+    else:
+        st.warning(f"No valid entry signal for {selected_market}")
 
-# =============================
-# STREAMLIT APP
-# =============================
-def main():
-    st.set_page_config("Universal Trading Bot", layout="wide")
-    st.title("📊 Universal Trading Bot (Live)")
-
-    market_options = {
-        "Crypto": ["BTC/USD", "ETH/USD", "SOL/USD"],
-        "Stocks": ["AAPL", "MSFT", "TSLA"],
-        "Forex": ["EUR/USD", "USD/JPY", "GBP/USD"],
-        "Commodities": ["Gold", "Silver", "Oil"],
-        "Indices": ["S&P 500", "NASDAQ", "DAX"]
-    }
-
-    with st.sidebar:
-        market_type = st.selectbox("Market Type", list(market_options.keys()))
-        symbol = st.selectbox("Symbol", market_options[market_type])
-        interval = st.selectbox("Interval", ["15m", "1h", "4h", "1d"], index=1)
-        risk_percent = st.slider("Risk per Trade (%)", 0.1, 10.0, 1.0, 0.1)
-        min_volatility = st.slider("Min ATR%", 0.5, 5.0, 1.5, 0.1)
-        generate_signal = st.button("🔍 Generate Signal")
-
-    st.markdown("### 🚀 Top Movers")
-    movers = get_top_movers(market_type, market_options[market_type], interval)
-    for m in movers:
-        st.write(f"**{m[0]}**: {m[1]}%")
-
-    if generate_signal:
-        df = fetch_market_data(market_type, symbol, interval)
-        if df is None or df.empty:
-            st.error("No data available.")
-            return
-
-        results = enhanced_rr_strategy(df.copy(), risk_percent, min_volatility)
-        last = results.iloc[-1]
-
-        st.header(f"📈 {symbol} | {interval} | Price: ${last['close']:.2f}")
-        st.metric("ATR %", f"{(last['atr']/last['close'])*100:.2f}%")
-        st.metric("Entry Signal", "✅" if last['entry_signal'] else "❌")
-
-        st.subheader("📜 Trade History")
-        trade_log = results[results['entry_signal']][['close', 'entry_price', 'stop_loss', 'tp_1', 'trade_result']].dropna()
-        st.dataframe(trade_log.tail(10).style.format({'close': '${:.2f}', 'entry_price': '${:.2f}'}))
-
-        st.subheader("📊 Live Chart")
-        tv_symbol = symbol.replace("/", "") if market_type in ["Forex", "Crypto"] else symbol
-        st.components.v1.iframe(f"https://s.tradingview.com/widgetembed/?frameElementId=tradingview_{tv_symbol}&symbol={tv_symbol}&interval=60&hidesidetoolbar=1&symboledit=1&saveimage=1&toolbarbg=f1f3f6&studies=[]&theme=dark&style=1&timezone=Etc%2FUTC", height=500)
-
-if __name__ == '__main__':
-    main()
+    st.subheader("📜 Trade History")
+    trade_df = df.dropna(subset=['entry_price', 'trade_result'])
+    st.dataframe(trade_df[['entry_price', 'stop_loss', 'tp_1', 'tp_2', 'tp_3', 'trade_result']].tail(10))
