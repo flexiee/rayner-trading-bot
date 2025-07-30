@@ -13,7 +13,8 @@ import yfinance as yf
 # TECHNICAL INDICATORS
 # =============================
 def calculate_ema(prices, period):
-    return pd.Series(prices).ewm(span=period, adjust=False).mean().values
+    prices = pd.Series(prices).squeeze()
+    return prices.ewm(span=period, adjust=False).mean().values
 
 def calculate_rsi(prices, period=14):
     delta = np.diff(prices)
@@ -46,7 +47,7 @@ def enhanced_rr_strategy(df, risk_percent=1.0, min_vol=1.5):
     df['ema_50'] = calculate_ema(df['close'].values, 50)
     df['rsi'] = calculate_rsi(df['close'].values)
     df['atr'] = calculate_atr(df['high'].values, df['low'].values, df['close'].values)
-    
+
     df['volume_ma'] = df['volume'].rolling(20).mean().fillna(0)
     volume_condition = df['volume'] > df['volume_ma'] * 1.2
     trend_condition = df['ema_20'] > df['ema_50']
@@ -61,7 +62,7 @@ def enhanced_rr_strategy(df, risk_percent=1.0, min_vol=1.5):
     df['tp_2'] = df['close'] + df['risk_distance'] * 2.618
     df['tp_3'] = df['close'] + df['risk_distance'] * 4.236
     df['position_size'] = (risk_percent / 100) / (df['risk_distance'] / df['close'])
-    
+
     df['entry_price'] = df['close'].where(df['entry_signal'])
     df['trade_result'] = np.nan
     for i in range(len(df) - 5):
@@ -135,31 +136,33 @@ def main():
         interval = st.selectbox("Interval", ["15m", "1h", "4h", "1d"], index=1)
         risk_percent = st.slider("Risk per Trade (%)", 0.1, 10.0, 1.0, 0.1)
         min_volatility = st.slider("Min ATR%", 0.5, 5.0, 1.5, 0.1)
+        generate_signal = st.button("🔍 Generate Signal")
 
     st.markdown("### 🚀 Top Movers")
     movers = get_top_movers(market_type, market_options[market_type], interval)
     for m in movers:
         st.write(f"**{m[0]}**: {m[1]}%")
 
-    df = fetch_market_data(market_type, symbol, interval)
-    if df is None or df.empty:
-        st.error("No data available.")
-        return
+    if generate_signal:
+        df = fetch_market_data(market_type, symbol, interval)
+        if df is None or df.empty:
+            st.error("No data available.")
+            return
 
-    results = enhanced_rr_strategy(df.copy(), risk_percent, min_volatility)
-    last = results.iloc[-1]
+        results = enhanced_rr_strategy(df.copy(), risk_percent, min_volatility)
+        last = results.iloc[-1]
 
-    st.header(f"📈 {symbol} | {interval} | Price: ${last['close']:.2f}")
-    st.metric("ATR %", f"{(last['atr']/last['close'])*100:.2f}%")
-    st.metric("Entry Signal", "✅" if last['entry_signal'] else "❌")
+        st.header(f"📈 {symbol} | {interval} | Price: ${last['close']:.2f}")
+        st.metric("ATR %", f"{(last['atr']/last['close'])*100:.2f}%")
+        st.metric("Entry Signal", "✅" if last['entry_signal'] else "❌")
 
-    st.subheader("📜 Trade History")
-    trade_log = results[results['entry_signal']][['close', 'entry_price', 'stop_loss', 'tp_1', 'trade_result']].dropna()
-    st.dataframe(trade_log.tail(10).style.format({'close': '${:.2f}', 'entry_price': '${:.2f}'}))
+        st.subheader("📜 Trade History")
+        trade_log = results[results['entry_signal']][['close', 'entry_price', 'stop_loss', 'tp_1', 'trade_result']].dropna()
+        st.dataframe(trade_log.tail(10).style.format({'close': '${:.2f}', 'entry_price': '${:.2f}'}))
 
-    st.subheader("📊 Chart Preview")
-    chart_data = results[['close', 'ema_20', 'ema_50']].rename(columns={'close': 'Price', 'ema_20': 'EMA 20', 'ema_50': 'EMA 50'})
-    st.line_chart(chart_data)
+        st.subheader("📊 Live Chart")
+        tv_symbol = symbol.replace("/", "") if market_type == "Forex" else symbol.replace("/", "") if market_type == "Crypto" else symbol
+        st.components.v1.iframe(f"https://s.tradingview.com/widgetembed/?frameElementId=tradingview_{tv_symbol}&symbol={tv_symbol}&interval=60&hidesidetoolbar=1&symboledit=1&saveimage=1&toolbarbg=f1f3f6&studies=[]&theme=dark&style=1&timezone=Etc%2FUTC", height=500)
 
 if __name__ == '__main__':
     main()
