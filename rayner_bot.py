@@ -1,12 +1,30 @@
 import streamlit as st
+from streamlit.components.v1 import iframe
 from tvDatafeed import TvDatafeed, Interval
 from datetime import datetime
 import pandas as pd
 import base64
+import json
+import os
 
-tv = TvDatafeed()
+# === Embedded Background Image ===
+bg_base64 = "iVBORw0KGgoAAAANSUhEUgAAAyAAAAHCCAIAAACYATqfAADjMUlEQVR4nOzdZVwU3fsw8JnZpRtESkApFRBssRO9VWxFsbsDsW67"  # Truncated
+bg_style = f"""
+<style>
+.stApp {{
+    background-image: url("data:image/png;base64,{bg_base64}");
+    background-size: cover;
+    background-attachment: fixed;
+    background-position: center;
+    background-repeat: no-repeat;
+    color: white;
+}}
+</style>
+"""
+st.markdown(bg_style, unsafe_allow_html=True)
 
-MARKET_SYMBOLS = {
+# === Symbol Configuration ===
+MARKET_SYMBOLS = {{
     "EUR/USD": ("OANDA", "EURUSD"),
     "GBP/JPY": ("OANDA", "GBPJPY"),
     "USD/JPY": ("OANDA", "USDJPY"),
@@ -14,128 +32,100 @@ MARKET_SYMBOLS = {
     "XAU/USD": ("OANDA", "XAUUSD"),
     "BTC/USD": ("BINANCE", "BTCUSDT"),
     "ETH/USD": ("BINANCE", "ETHUSDT"),
-    "Gold": ("OANDA", "XAUUSD"),
-    "Silver": ("OANDA", "XAGUSD"),
-    "Oil WTI": ("OANDA", "WTICOUSD"),
-    "NIFTY 50": ("NSE", "NIFTY"),
-    "BANKNIFTY": ("NSE", "BANKNIFTY"),
-}
+    "Oil": ("OANDA", "WTICOUSD")
+}}
 
-# ✅ Embedded image as base64 string (from your 13812.png)
-def get_encoded_bg():
-    return """
-    iVBORw0KGgoAAAANSUhEUgAAA... (very long string clipped for brevity)
-    """
+tv = TvDatafeed()
 
-def get_live_data(exchange, symbol):
-    df = tv.get_hist(symbol=symbol, exchange=exchange, interval=Interval.in_1_minute, n_bars=20)
-    if df is None or df.empty:
-        return None
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    price = round(last['close'], 5)
-    prev_price = round(prev['close'], 5)
-    support = round(df['low'].min(), 5)
-    resistance = round(df['high'].max(), 5)
-    momentum = "strong" if abs(price - prev_price) > 0.0008 else "weak"
-    volatility = round(df['high'].std() * 10000)
-    trend = "uptrend" if price > df['close'].rolling(5).mean().iloc[-1] else "downtrend"
-    return {
-        "price": price,
-        "trend": trend,
-        "support": support,
-        "resistance": resistance,
-        "momentum": momentum,
-        "volatility": volatility,
-        "signal_strength": min(100, max(10, volatility))
-    }
+# === Historical Signal Logging ===
+history_path = "signal_history.json"
+if not os.path.exists(history_path):
+    with open(history_path, "w") as f:
+        json.dump([], f)
 
-def generate_signal(data, account_balance):
-    entry = data["price"]
-    risk_amount = account_balance * 0.01
-    pip_value = 10 if data["volatility"] < 100 else 20
-    pip_risk = risk_amount / pip_value
-    sl, tp = None, None
-    signal = "WAIT"
-    reasons = []
+def log_signal(signal_data):
+    with open(history_path, "r+") as f:
+        data = json.load(f)
+        data.append(signal_data)
+        f.seek(0)
+        json.dump(data[-100:], f, indent=4)  # Keep only last 100
 
-    if data["trend"] == "uptrend" and data["momentum"] == "strong":
-        sl = entry - pip_risk
-        tp = entry + (entry - sl) * 3
-        signal = "BUY"
-        reasons.append("Strong uptrend confirmed")
-    elif data["trend"] == "downtrend" and data["momentum"] == "strong":
-        sl = entry + pip_risk
-        tp = entry - (sl - entry) * 3
-        signal = "SELL"
-        reasons.append("Strong downtrend confirmed")
+# === Signal Calculation ===
+def get_signal(symbol_info, balance):
+    exch, sym = symbol_info
+    df = tv.get_hist(sym, exch, interval=Interval.in_1_minute, n_bars=30)
+    if df is None or df.empty: return None
+    price = df.close.iloc[-1]
+    mean = df.close.rolling(5).mean().iloc[-1]
+    std = df.close.rolling(5).std().iloc[-1]
+    momentum = abs(df.close.iloc[-1] - df.close.iloc[-2])
+    trend = "UP" if price > mean else "DOWN"
+    volatility = round(std * 10000)
+    risk = balance * 0.01
+    pip_value = 10
+    pip_risk = risk / pip_value
+    sl = price - pip_risk if trend == "UP" else price + pip_risk
+    tp = price + (price - sl) * 3 if trend == "UP" else price - (sl - price) * 3
+    confidence = min(100, max(50, int(momentum * 10000)))
+    rr_ratio = abs(tp - price) / abs(price - sl)
+    signal = "BUY" if trend == "UP" and momentum > 0.0008 else "SELL" if trend == "DOWN" and momentum > 0.0008 else "WAIT"
+    lot_size = round((risk / (abs(price - sl) * pip_value)), 2)
 
-    rr_ratio = round(abs((tp - entry) / (entry - sl)), 2) if sl and tp else None
-    return {
+    return {{
+        "price": round(price, 5),
         "signal": signal,
-        "entry": round(entry, 5),
-        "stop_loss": round(sl, 5) if sl else None,
-        "take_profit": round(tp, 5) if tp else None,
-        "confidence": data["signal_strength"],
-        "risk_amount": round(risk_amount, 2),
-        "reward_amount": round(risk_amount * 3, 2),
-        "lot_size": round(risk_amount / 10, 2),
-        "rr_ratio": rr_ratio,
-        "reasons": reasons
-    }
+        "trend": trend,
+        "confidence": confidence,
+        "volatility": volatility,
+        "momentum": round(momentum, 5),
+        "stop_loss": round(sl, 5),
+        "take_profit": round(tp, 5),
+        "risk_amount": round(risk, 2),
+        "reward_amount": round(abs(tp - price) * pip_value, 2),
+        "rr_ratio": round(rr_ratio, 2),
+        "lot_size": lot_size
+    }}
 
-def save_to_history(market, signal_info, result="PENDING"):
-    filename = "signal_history.csv"
-    record = {
-        "datetime": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        "market": market,
-        "signal": signal_info["signal"],
-        "entry": signal_info["entry"],
-        "sl": signal_info["stop_loss"],
-        "tp": signal_info["take_profit"],
-        "r:r": signal_info["rr_ratio"],
-        "lot": signal_info["lot_size"],
-        "confidence": signal_info["confidence"],
-        "result": result
-    }
-    try:
-        df = pd.read_csv(filename)
-        df = pd.concat([df, pd.DataFrame([record])], ignore_index=True)
-    except:
-        df = pd.DataFrame([record])
-    df.to_csv(filename, index=False)
+# === UI ===
+st.set_page_config(layout="wide")
+st.title("📈 Pro Trading Bot")
 
-def main():
-    st.set_page_config(layout="wide", page_title="📊 Rayner Trading Bot")
+col1, col2 = st.columns([3, 1])
+with col1:
+    market = st.selectbox("Select Market", list(MARKET_SYMBOLS.keys()))
+    iframe(f"https://s.tradingview.com/widgetembed/?symbol={MARKET_SYMBOLS[market][0]}:{MARKET_SYMBOLS[market][1]}&interval=1&theme=dark", height=420)
 
-    bg_base64 = get_encoded_bg()
-    st.markdown(f"""<style>.stApp {{
-        background-image: url("data:image/png;base64,{bg_base64}");
-        background-size: cover; background-position: center; }}</style>""", unsafe_allow_html=True)
+with col2:
+    balance = st.number_input("Enter account balance ($)", value=1000)
+    if st.button("Generate Signal"):
+        result = get_signal(MARKET_SYMBOLS[market], balance)
+        if result:
+            st.subheader(f"Signal for {market}")
+            st.markdown(f"**Signal:** {result['signal']}")
+            st.markdown(f"**Trend:** {result['trend']}  |  **Confidence:** {result['confidence']}%")
+            st.markdown(f"**Volatility:** {result['volatility']}  |  **Momentum:** {result['momentum']}")
+            st.markdown(f"**Stop Loss:** {result['stop_loss']}  |  **Take Profit:** {result['take_profit']}")
+            st.markdown(f"**R:R Ratio:** {result['rr_ratio']}  |  **Lot Size:** {result['lot_size']} lots")
+            st.progress(result['confidence'])
 
-    st.title("⚡ Pro Trading Bot with Alerts & Risk Management")
+            log_signal({{
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "market": market,
+                "signal": result['signal'],
+                "confidence": result['confidence'],
+                "rr_ratio": result['rr_ratio'],
+                "result": "Pending"
+            }})
 
-    account_balance = st.number_input("💰 Enter Account Balance ($)", min_value=10, value=1000)
-    market = st.selectbox("📈 Select Market", list(MARKET_SYMBOLS.keys()))
-    if st.button("🔄 Generate Signal"):
-        exch, sym = MARKET_SYMBOLS[market]
-        data = get_live_data(exch, sym)
-        if data:
-            signal = generate_signal(data, account_balance)
-            save_to_history(market, signal)
-            st.subheader("✅ Signal")
-            st.write(signal)
-            if signal["rr_ratio"] in [6, 9] and signal["confidence"] >= 100:
-                st.success(f"🚨 High R:R Signal ({signal['rr_ratio']}:1) with 110% confirmation!")
-        else:
-            st.error("⚠ Failed to fetch live data")
+            if result['rr_ratio'] >= 6 and result['confidence'] >= 90:
+                st.success("🚨 High R:R Signal Detected (≥ 1:6)")
+            if result['rr_ratio'] >= 9 and result['confidence'] >= 100:
+                st.success("🔥🔥 Massive R:R (≥ 1:9) with Full Confidence")
 
-    if st.checkbox("📜 Show Signal History"):
-        try:
-            df = pd.read_csv("signal_history.csv")
-            st.dataframe(df)
-        except:
-            st.info("No signal history found.")
-
-if __name__ == "__main__":
-    main()
+with st.expander("📜 Signal History"):
+    if os.path.exists(history_path):
+        with open(history_path) as f:
+            hist = json.load(f)
+            df = pd.DataFrame(hist)
+            st.dataframe(df[::-1])
+        
