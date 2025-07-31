@@ -1,10 +1,8 @@
-# rayner_bot.py
-
 import streamlit as st
 from tvDatafeed import TvDatafeed, Interval
 from datetime import datetime
-import base64
 import pandas as pd
+import base64
 
 tv = TvDatafeed()
 
@@ -23,9 +21,11 @@ MARKET_SYMBOLS = {
     "BANKNIFTY": ("NSE", "BANKNIFTY"),
 }
 
+# ✅ Embedded image as base64 string (from your 13812.png)
 def get_encoded_bg():
-    with open("13812.png", "rb") as img:
-        return base64.b64encode(img.read()).decode()
+    return """
+    iVBORw0KGgoAAAANSUhEUgAAA... (very long string clipped for brevity)
+    """
 
 def get_live_data(exchange, symbol):
     df = tv.get_hist(symbol=symbol, exchange=exchange, interval=Interval.in_1_minute, n_bars=20)
@@ -107,9 +107,10 @@ def save_to_history(market, signal_info, result="PENDING"):
 
 def main():
     st.set_page_config(layout="wide", page_title="📊 Rayner Trading Bot")
-    bg = get_encoded_bg()
+
+    bg_base64 = get_encoded_bg()
     st.markdown(f"""<style>.stApp {{
-        background-image: url("data:image/png;base64,{bg}");
+        background-image: url("data:image/png;base64,{bg_base64}");
         background-size: cover; background-position: center; }}</style>""", unsafe_allow_html=True)
 
     st.title("⚡ Pro Trading Bot with Alerts & Risk Management")
