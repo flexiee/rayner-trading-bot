@@ -1,3 +1,4 @@
+import base64
 from datetime import datetime
 import streamlit as st
 from tvDatafeed import TvDatafeed, Interval
@@ -29,21 +30,19 @@ CATEGORIES = {
 
 def get_live_data(symbol_info):
     exchange, symbol = symbol_info
-    df = tv.get_hist(symbol=symbol, exchange=exchange, interval=Interval.in_1_minute, n_bars=20)
+    df = tv.get_hist(symbol=symbol, exchange=exchange, interval=Interval.in_1_minute, n_bars=50)
     if df is None or df.empty:
         return None
+    df['EMA5'] = df['close'].ewm(span=5).mean()
+    df['EMA20'] = df['close'].ewm(span=20).mean()
     last = df.iloc[-1]
     prev = df.iloc[-2]
     price = round(last['close'], 5)
-    prev_price = round(prev['close'], 5)
     support = round(df['low'].min(), 5)
     resistance = round(df['high'].max(), 5)
-    momentum = "strong" if abs(price - prev_price) > 0.0008 else "weak"
+    momentum = "strong" if abs(price - prev['close']) > 0.0008 else "weak"
     volatility = round(df['high'].std() * 10000)
-    trend = "uptrend" if price > df['close'].rolling(5).mean().iloc[-1] else "downtrend"
-    rsi = calculate_rsi(df['close'], 14).iloc[-1]
-    pattern = detect_candlestick_pattern(df)
-
+    trend = "uptrend" if last['EMA5'] > last['EMA20'] else "downtrend"
     return {
         "price": price,
         "trend": trend,
@@ -51,25 +50,9 @@ def get_live_data(symbol_info):
         "resistance": resistance,
         "momentum": momentum,
         "volatility": volatility,
-        "signal_strength": min(100, max(10, volatility)),
-        "change": price - prev_price,
-        "rsi": round(rsi, 2),
-        "pattern": pattern
+        "ema_gap": round(last['EMA5'] - last['EMA20'], 5),
+        "change": price - prev['close']
     }
-
-def calculate_rsi(series, period=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
-
-def detect_candlestick_pattern(df):
-    if df['close'].iloc[-1] > df['open'].iloc[-1] and df['open'].iloc[-1] < df['low'].iloc[-1]:
-        return "Hammer"
-    if df['close'].iloc[-1] < df['open'].iloc[-1] and df['open'].iloc[-1] > df['high'].iloc[-1]:
-        return "Shooting Star"
-    return "None"
 
 def generate_signal(data, account_balance):
     entry = data["price"]
@@ -80,40 +63,19 @@ def generate_signal(data, account_balance):
     signal = "WAIT"
     reasons = []
 
-    # ✅ Condition 1: Pro Trader Trend
     if data["trend"] == "uptrend" and entry > data["support"]:
-        if data["momentum"] == "strong" and data["volatility"] > 50 and data["rsi"] < 70:
+        if data["momentum"] == "strong" and data["volatility"] > 50 and data["ema_gap"] > 0:
             sl = entry - pip_risk
             tp = entry + (entry - sl) * 3
             signal = "BUY"
-            reasons.append("Livermore trend confirmation")
+            reasons.append("EMA crossover + strong uptrend")
+
     elif data["trend"] == "downtrend" and entry < data["resistance"]:
-        if data["momentum"] == "strong" and data["volatility"] > 50 and data["rsi"] > 30:
+        if data["momentum"] == "strong" and data["volatility"] > 50 and data["ema_gap"] < 0:
             sl = entry + pip_risk
             tp = entry - (sl - entry) * 3
             signal = "SELL"
-            reasons.append("Livermore trend confirmation")
-
-    # ✅ Condition 2: RSI extreme levels
-    if data["rsi"] > 80:
-        signal = "SELL"
-        reasons.append("RSI overbought level")
-    elif data["rsi"] < 20:
-        signal = "BUY"
-        reasons.append("RSI oversold level")
-
-    # ✅ Condition 3: Candlestick pattern confirmation
-    if data["pattern"] == "Hammer":
-        signal = "BUY"
-        reasons.append("Hammer pattern detected")
-    elif data["pattern"] == "Shooting Star":
-        signal = "SELL"
-        reasons.append("Shooting Star pattern detected")
-
-    # ✅ Force BUY/SELL on 100% confidence
-    if data["signal_strength"] >= 100 and signal == "WAIT":
-        signal = "BUY" if data["trend"] == "uptrend" else "SELL"
-        reasons.append("High confidence forced signal")
+            reasons.append("EMA crossover + strong downtrend")
 
     lot_size = round(risk_amount / abs(entry - sl), 2) if sl else 0
 
@@ -122,51 +84,46 @@ def generate_signal(data, account_balance):
         "entry": round(entry, 5),
         "stop_loss": round(sl, 5) if sl else None,
         "take_profit": round(tp, 5) if tp else None,
-        "confidence": data["signal_strength"],
+        "confidence": min(100, data["volatility"]),
         "reasons": reasons,
         "risk_amount": round(risk_amount, 2),
         "reward_amount": round(risk_amount * 3, 2),
-        "lot_size": lot_size,
-        "r_r_ratio": round((abs(tp - entry) / abs(entry - sl)), 2) if sl and tp else None
+        "lot_size": lot_size
     }
 
 def run_ui():
-    st.set_page_config(layout="wide", page_title="🔥 Pro Signal Bot")
+    st.set_page_config(layout="wide", page_title="📈 Advanced Trading Bot")
+    st.title("📊 Pro Strategy Signal Bot")
 
-    st.title("🔥 Pro Signal Trading Bot")
     if "favorites" not in st.session_state:
         st.session_state.favorites = []
     if "selected_market" not in st.session_state:
         st.session_state.selected_market = "EUR/USD"
-    if "history" not in st.session_state:
-        st.session_state.history = []
 
-    account_balance = st.sidebar.number_input("Account Balance ($)", value=1000, min_value=10)
+    account_balance = st.sidebar.number_input("💰 Account Balance ($)", value=1000, min_value=10)
 
-    # 🔥 High Movement Markets
-    movement_scores = {}
+    # Movement Tracker
+    st.sidebar.subheader("🔥 Top Movers")
+    movement = {}
     for market, info in MARKET_SYMBOLS.items():
         data = get_live_data(info)
         if data:
-            movement_scores[market] = abs(data["change"])
+            movement[market] = abs(data["change"])
+    movers = sorted(movement.items(), key=lambda x: x[1], reverse=True)[:3]
+    for m in movers:
+        st.sidebar.write(f"{m[0]}: {round(m[1], 5)}")
 
-    high_movement = sorted(movement_scores.items(), key=lambda x: x[1], reverse=True)[:3]
-    st.sidebar.subheader("🔥 High Movement")
-    for market, delta in high_movement:
-        st.sidebar.write(f"{market}: {round(delta, 5)}")
-
-    # ⭐ Favorites Watchlist
-    st.sidebar.subheader("⭐ Favorites")
+    # Watchlist
+    st.sidebar.subheader("⭐ Watchlist")
     for fav in st.session_state.favorites:
         exch, sym = MARKET_SYMBOLS[fav]
         df = tv.get_hist(sym, exch, Interval.in_1_minute, n_bars=1)
         if df is not None and not df.empty:
-            price = df.iloc[-1]["close"]
-            st.sidebar.markdown(f"**{fav}**: {round(price, 5)}")
+            price = df.iloc[-1]['close']
+            st.sidebar.write(f"**{fav}**: {round(price, 5)}")
 
-    # 📂 Market Category Picker
-    st.sidebar.subheader("📂 Market Category")
-    category = st.sidebar.selectbox("Market Category", list(CATEGORIES.keys()))
+    st.sidebar.subheader("📂 Categories")
+    category = st.sidebar.selectbox("Select Category", list(CATEGORIES.keys()))
     for market in CATEGORIES[category]:
         col1, col2 = st.columns([8, 1])
         if col1.button(market):
@@ -177,50 +134,31 @@ def run_ui():
             else:
                 st.session_state.favorites.append(market)
 
-    # 📊 Display Market + Chart
     selected = st.session_state.selected_market
     exch, sym = MARKET_SYMBOLS[selected]
     st.subheader(f"📊 {selected} Live Chart")
     st.components.v1.iframe(f"https://s.tradingview.com/widgetembed/?symbol={exch}:{sym}&interval=1&theme=dark", height=400)
 
-    # 🔎 Analyze Button
-    if st.button("🔍 Analyze"):
+    if st.button("🔁 Refresh Signal"):
         data = get_live_data((exch, sym))
         if data:
             signal = generate_signal(data, account_balance)
-            st.subheader("📌 Market Data")
-            st.write(f"Trend: {data['trend']}")
-            st.write(f"Momentum: {data['momentum']} | Volatility: {data['volatility']}")
-            st.write(f"Support: {data['support']} | Resistance: {data['resistance']}")
-            st.write(f"RSI: {data['rsi']} | Pattern: {data['pattern']}")
+            st.subheader("📌 Market Snapshot")
+            st.write(f"Trend: **{data['trend']}**")
+            st.write(f"Momentum: **{data['momentum']}**")
+            st.write(f"Volatility: **{data['volatility']}**")
+            st.write(f"EMA GAP: {data['ema_gap']}")
 
-            st.subheader("✅ Signal")
-            st.write(f"Signal: {signal['signal']} | Confidence: {signal['confidence']}%")
+            st.subheader("✅ Signal Output")
+            st.write(f"Signal: `{signal['signal']}`")
             st.progress(signal["confidence"])
             st.write(f"Entry: {signal['entry']} | SL: {signal['stop_loss']} | TP: {signal['take_profit']}")
-            st.write(f"Risk: {signal['risk_amount']} | Reward: {signal['reward_amount']}")
-            st.write(f"Lot Size: {signal['lot_size']} | R:R Ratio: {signal['r_r_ratio']}")
+            st.write(f"Risk: ${signal['risk_amount']} | Reward: ${signal['reward_amount']}")
+            st.write(f"Lot Size: {signal['lot_size']}")
+            st.markdown(f"**Reason:** {' | '.join(signal['reasons'])}")
             st.caption(f"Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
-            for reason in signal["reasons"]:
-                st.info(reason)
-
-            # 💾 Save to History
-            result = {
-                "Time": datetime.now().strftime('%H:%M:%S'),
-                "Market": selected,
-                "Signal": signal["signal"],
-                "Result": "Pending"
-            }
-            st.session_state.history.append(result)
         else:
-            st.error("❌ Unable to fetch live data.")
-
-    # 🕘 Signal History
-    if st.session_state.history:
-        st.subheader("📋 Signal History (Live)")
-        history_df = pd.DataFrame(st.session_state.history)
-        st.dataframe(history_df)
+            st.error("❌ Could not fetch data. Try again later.")
 
 if __name__ == "__main__":
     run_ui()
