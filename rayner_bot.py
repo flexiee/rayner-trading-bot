@@ -1,8 +1,8 @@
-import pytz
 import streamlit as st
 from datetime import datetime
-from streamlit.components.v1 import iframe
 from tvDatafeed import TvDatafeed, Interval
+import pandas as pd
+import os
 
 tv = TvDatafeed()
 
@@ -28,9 +28,58 @@ CATEGORIES = {
     "Indices": ["NIFTY 50", "BANKNIFTY"]
 }
 
+HISTORY_FILE = "signal_history.csv"
+if not os.path.exists(HISTORY_FILE):
+    pd.DataFrame(columns=[
+        "Datetime", "Market", "Signal", "Entry", "Stop Loss", "Take Profit",
+        "Confidence", "Lot Size", "Status"
+    ]).to_csv(HISTORY_FILE, index=False)
+
+def log_signal_history(market, signal_data):
+    row = {
+        "Datetime": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        "Market": market,
+        "Signal": signal_data["signal"],
+        "Entry": signal_data["entry"],
+        "Stop Loss": signal_data["stop_loss"],
+        "Take Profit": signal_data["take_profit"],
+        "Confidence": signal_data["confidence"],
+        "Lot Size": signal_data["lot_size"],
+        "Status": "pending"
+    }
+    df = pd.read_csv(HISTORY_FILE)
+    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    df.to_csv(HISTORY_FILE, index=False)
+
+def update_signal_status(latest_price, market):
+    df = pd.read_csv(HISTORY_FILE)
+    updated = False
+    for i in df.index:
+        if df.loc[i, "Market"] == market and df.loc[i, "Status"] == "pending":
+            signal = df.loc[i, "Signal"]
+            entry = float(df.loc[i, "Entry"])
+            sl = float(df.loc[i, "Stop Loss"])
+            tp = float(df.loc[i, "Take Profit"])
+            if signal == "BUY":
+                if latest_price >= tp:
+                    df.loc[i, "Status"] = "success"
+                    updated = True
+                elif latest_price <= sl:
+                    df.loc[i, "Status"] = "fail"
+                    updated = True
+            elif signal == "SELL":
+                if latest_price <= tp:
+                    df.loc[i, "Status"] = "success"
+                    updated = True
+                elif latest_price >= sl:
+                    df.loc[i, "Status"] = "fail"
+                    updated = True
+    if updated:
+        df.to_csv(HISTORY_FILE, index=False)
+
 def get_live_data(symbol_info):
     exchange, symbol = symbol_info
-    df = tv.get_hist(symbol=symbol, exchange=exchange, interval=Interval.in_1_minute, n_bars=30)
+    df = tv.get_hist(symbol=symbol, exchange=exchange, interval=Interval.in_1_minute, n_bars=20)
     if df is None or df.empty:
         return None
     last = df.iloc[-1]
@@ -41,7 +90,6 @@ def get_live_data(symbol_info):
     resistance = round(df['high'].max(), 5)
     momentum = "strong" if abs(price - prev_price) > 0.0008 else "weak"
     volatility = round(df['high'].std() * 10000)
-    atr = round((df['high'] - df['low']).rolling(5).mean().iloc[-1], 5)
     trend = "uptrend" if price > df['close'].rolling(5).mean().iloc[-1] else "downtrend"
     return {
         "price": price,
@@ -50,37 +98,33 @@ def get_live_data(symbol_info):
         "resistance": resistance,
         "momentum": momentum,
         "volatility": volatility,
-        "atr": atr,
         "signal_strength": min(100, max(10, volatility)),
         "change": price - prev_price
     }
 
-def generate_signal(data, account_balance, market_name):
+def generate_signal(data, account_balance):
     entry = data["price"]
     risk_amount = account_balance * 0.01
-    atr_buffer = data["atr"] if data["atr"] > 0 else 0.002
-    sl, tp, signal = None, None, "WAIT"
+    pip_value = 10
+    pip_risk = risk_amount / pip_value
+    sl, tp = None, None
+    signal = "WAIT"
     reasons = []
 
-    if data["trend"] == "uptrend" and data["momentum"] == "strong":
-        sl = entry - atr_buffer
-        tp = entry + (entry - sl) * 3
-        signal = "BUY"
-        reasons.append("Confirmed uptrend breakout")
-    elif data["trend"] == "downtrend" and data["momentum"] == "strong":
-        sl = entry + atr_buffer
-        tp = entry - (sl - entry) * 3
-        signal = "SELL"
-        reasons.append("Confirmed downtrend breakout")
+    if data["trend"] == "uptrend" and entry > data["support"]:
+        if data["momentum"] == "strong" and data["volatility"] > 50:
+            sl = entry - pip_risk
+            tp = entry + (entry - sl) * 3
+            signal = "BUY"
+            reasons.append("Strong uptrend breakout")
+    elif data["trend"] == "downtrend" and entry < data["resistance"]:
+        if data["momentum"] == "strong" and data["volatility"] > 50:
+            sl = entry + pip_risk
+            tp = entry - (sl - entry) * 3
+            signal = "SELL"
+            reasons.append("Strong downtrend breakout")
 
-    sl_distance = abs(entry - sl) if sl else 0.001
-    base_lot = risk_amount / sl_distance if sl_distance > 0 else 0
-
-    # Risk-limiting factor by market
-    scale_factor = 1.0
-    if market_name in ["BTC/USD", "ETH/USD", "XAU/USD"]:
-        scale_factor = 0.3  # reduce lot size for high volatility
-    lot_size = round(base_lot * scale_factor, 3)
+    lot_size = round(risk_amount / abs(entry - sl), 2) if sl else 0
 
     return {
         "signal": signal,
@@ -95,29 +139,37 @@ def generate_signal(data, account_balance, market_name):
     }
 
 def run_ui():
-    st.set_page_config(layout="wide", page_title="🔥 Real-Time Trading Bot")
-    st.title("🔥 Most Accurate Trading Signal Bot")
-
-    india_time = datetime.now(pytz.timezone("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S")
-    st.sidebar.write(f"🕒 India Time: {india_time}")
+    st.set_page_config(layout="wide", page_title="📈 Pro Trading Bot")
+    st.title("📈 Pro Trading Bot")
 
     if "favorites" not in st.session_state:
         st.session_state.favorites = []
     if "selected_market" not in st.session_state:
         st.session_state.selected_market = "EUR/USD"
 
-    account_balance = st.sidebar.number_input("💰 Account Balance ($)", value=1000, min_value=10)
+    account_balance = st.sidebar.number_input("💰 Account Balance", min_value=10, value=1000)
 
-    st.sidebar.subheader("⭐ Favorites")
+    movement_scores = {}
+    for market, info in MARKET_SYMBOLS.items():
+        data = get_live_data(info)
+        if data:
+            movement_scores[market] = abs(data["change"])
+
+    high_movement = sorted(movement_scores.items(), key=lambda x: x[1], reverse=True)[:3]
+    st.sidebar.subheader("🔥 High Movement Markets")
+    for market, delta in high_movement:
+        st.sidebar.write(f"{market}: {round(delta, 5)}")
+
+    st.sidebar.subheader("⭐ Watchlist")
     for fav in st.session_state.favorites:
         exch, sym = MARKET_SYMBOLS[fav]
         df = tv.get_hist(sym, exch, Interval.in_1_minute, n_bars=1)
         if df is not None and not df.empty:
             price = df.iloc[-1]["close"]
-            st.sidebar.write(f"{fav}: {round(price, 5)}")
+            st.sidebar.markdown(f"{fav}: {round(price, 5)}")
 
-    st.sidebar.subheader("📂 Categories")
-    category = st.sidebar.selectbox("Select Category", list(CATEGORIES.keys()))
+    st.sidebar.subheader("📂 Market Categories")
+    category = st.sidebar.selectbox("Choose Category", list(CATEGORIES.keys()))
     for market in CATEGORIES[category]:
         col1, col2 = st.columns([8, 1])
         if col1.button(market):
@@ -130,32 +182,40 @@ def run_ui():
 
     selected = st.session_state.selected_market
     exch, sym = MARKET_SYMBOLS[selected]
-    st.subheader(f"📊 {selected} Live Chart")
-    iframe(f"https://s.tradingview.com/widgetembed/?symbol={exch}:{sym}&interval=1&theme=dark", height=400)
+    st.subheader(f"📊 {selected} Chart")
+    st.components.v1.iframe(f"https://s.tradingview.com/widgetembed/?symbol={exch}:{sym}&interval=1&theme=dark", height=400)
 
-    if st.button("🔁 Refresh Signal"):
+    if st.button("🔄 Refresh Signal"):
         data = get_live_data((exch, sym))
         if data:
-            signal = generate_signal(data, account_balance, selected)
+            signal = generate_signal(data, account_balance)
+            log_signal_history(selected, signal)
+            update_signal_status(data["price"], selected)
 
             st.subheader("📌 Market Snapshot")
             st.write(f"Trend: {data['trend']}")
             st.write(f"Momentum: {data['momentum']}")
             st.write(f"Volatility: {data['volatility']}")
-            st.write(f"ATR (buffer): {data['atr']}")
             st.write(f"Support: {data['support']} | Resistance: {data['resistance']}")
 
-            st.subheader("✅ Signal Result")
+            st.subheader("✅ Signal")
             st.write(f"Signal: {signal['signal']}")
-            st.progress(signal['confidence'])
+            st.progress(signal["confidence"])
             st.write(f"Entry: {signal['entry']} | SL: {signal['stop_loss']} | TP: {signal['take_profit']}")
             st.write(f"Risk: ${signal['risk_amount']} | Reward: ${signal['reward_amount']}")
             st.write(f"Recommended Lot Size: {signal['lot_size']}")
-
-            if signal['signal'] in ["BUY", "SELL"] and signal['confidence'] >= 90:
-                st.success(f"📢 High Accuracy {signal['signal']} Opportunity Detected!")
+            st.caption(f"Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         else:
-            st.error("❌ Failed to fetch data.")
+            st.error("❌ Data fetch failed.")
+
+    st.markdown("---")
+    st.subheader("📜 Signal History")
+    try:
+        df = pd.read_csv(HISTORY_FILE)
+        df_sorted = df.sort_values(by="Datetime", ascending=False)
+        st.dataframe(df_sorted, use_container_width=True)
+    except:
+        st.info("No signal history yet.")
 
 if __name__ == "__main__":
     run_ui()
