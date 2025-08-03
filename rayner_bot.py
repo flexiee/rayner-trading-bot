@@ -30,7 +30,7 @@ CATEGORIES = {
 
 def get_live_data(symbol_info):
     exchange, symbol = symbol_info
-    df = tv.get_hist(symbol=symbol, exchange=exchange, interval=Interval.in_1_minute, n_bars=20)
+    df = tv.get_hist(symbol=symbol, exchange=exchange, interval=Interval.in_1_minute, n_bars=30)
     if df is None or df.empty:
         return None
     last = df.iloc[-1]
@@ -41,6 +41,7 @@ def get_live_data(symbol_info):
     resistance = round(df['high'].max(), 5)
     momentum = "strong" if abs(price - prev_price) > 0.0008 else "weak"
     volatility = round(df['high'].std() * 10000)
+    atr = round((df['high'] - df['low']).rolling(5).mean().iloc[-1], 5)
     trend = "uptrend" if price > df['close'].rolling(5).mean().iloc[-1] else "downtrend"
     return {
         "price": price,
@@ -49,33 +50,37 @@ def get_live_data(symbol_info):
         "resistance": resistance,
         "momentum": momentum,
         "volatility": volatility,
+        "atr": atr,
         "signal_strength": min(100, max(10, volatility)),
         "change": price - prev_price
     }
 
-def generate_signal(data, account_balance):
+def generate_signal(data, account_balance, market_name):
     entry = data["price"]
-    risk_amount = account_balance * 0.01  # 1% of account balance
-    pip_value = 10
-    pip_risk = risk_amount / pip_value
-    sl, tp = None, None
-    signal = "WAIT"
+    risk_amount = account_balance * 0.01
+    atr_buffer = data["atr"] if data["atr"] > 0 else 0.002
+    sl, tp, signal = None, None, "WAIT"
     reasons = []
 
-    if data["trend"] == "uptrend" and entry > data["support"]:
-        if data["momentum"] == "strong" and data["volatility"] > 50:
-            sl = entry - pip_risk
-            tp = entry + (entry - sl) * 3
-            signal = "BUY"
-            reasons.append("Strong uptrend breakout")
-    elif data["trend"] == "downtrend" and entry < data["resistance"]:
-        if data["momentum"] == "strong" and data["volatility"] > 50:
-            sl = entry + pip_risk
-            tp = entry - (sl - entry) * 3
-            signal = "SELL"
-            reasons.append("Strong downtrend breakout")
+    if data["trend"] == "uptrend" and data["momentum"] == "strong":
+        sl = entry - atr_buffer
+        tp = entry + (entry - sl) * 3
+        signal = "BUY"
+        reasons.append("Confirmed uptrend breakout")
+    elif data["trend"] == "downtrend" and data["momentum"] == "strong":
+        sl = entry + atr_buffer
+        tp = entry - (sl - entry) * 3
+        signal = "SELL"
+        reasons.append("Confirmed downtrend breakout")
 
-    lot_size = round(risk_amount / abs(entry - sl), 2) if sl else 0
+    sl_distance = abs(entry - sl) if sl else 0.001
+    base_lot = risk_amount / sl_distance if sl_distance > 0 else 0
+
+    # Risk-limiting factor by market
+    scale_factor = 1.0
+    if market_name in ["BTC/USD", "ETH/USD", "XAU/USD"]:
+        scale_factor = 0.3  # reduce lot size for high volatility
+    lot_size = round(base_lot * scale_factor, 3)
 
     return {
         "signal": signal,
@@ -90,12 +95,11 @@ def generate_signal(data, account_balance):
     }
 
 def run_ui():
-    st.set_page_config(layout="wide", page_title="📈 Real-Time Pro Trading Bot")
-    st.title("📈 Real-Time Pro Trading Bot")
+    st.set_page_config(layout="wide", page_title="🔥 Real-Time Trading Bot")
+    st.title("🔥 Most Accurate Trading Signal Bot")
 
-    # Sidebar: show real time
     india_time = datetime.now(pytz.timezone("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S")
-    st.sidebar.write(f"🕒 Time: {india_time}")
+    st.sidebar.write(f"🕒 India Time: {india_time}")
 
     if "favorites" not in st.session_state:
         st.session_state.favorites = []
@@ -112,7 +116,7 @@ def run_ui():
             price = df.iloc[-1]["close"]
             st.sidebar.write(f"{fav}: {round(price, 5)}")
 
-    st.sidebar.subheader("📂 Market Categories")
+    st.sidebar.subheader("📂 Categories")
     category = st.sidebar.selectbox("Select Category", list(CATEGORIES.keys()))
     for market in CATEGORIES[category]:
         col1, col2 = st.columns([8, 1])
@@ -124,7 +128,6 @@ def run_ui():
             else:
                 st.session_state.favorites.append(market)
 
-    # Display Market Chart
     selected = st.session_state.selected_market
     exch, sym = MARKET_SYMBOLS[selected]
     st.subheader(f"📊 {selected} Live Chart")
@@ -133,23 +136,26 @@ def run_ui():
     if st.button("🔁 Refresh Signal"):
         data = get_live_data((exch, sym))
         if data:
-            signal = generate_signal(data, account_balance)
+            signal = generate_signal(data, account_balance, selected)
 
             st.subheader("📌 Market Snapshot")
             st.write(f"Trend: {data['trend']}")
             st.write(f"Momentum: {data['momentum']}")
             st.write(f"Volatility: {data['volatility']}")
-            st.write(f"Support: {data['support']}")
-            st.write(f"Resistance: {data['resistance']}")
+            st.write(f"ATR (buffer): {data['atr']}")
+            st.write(f"Support: {data['support']} | Resistance: {data['resistance']}")
 
             st.subheader("✅ Signal Result")
             st.write(f"Signal: {signal['signal']}")
             st.progress(signal['confidence'])
             st.write(f"Entry: {signal['entry']} | SL: {signal['stop_loss']} | TP: {signal['take_profit']}")
             st.write(f"Risk: ${signal['risk_amount']} | Reward: ${signal['reward_amount']}")
-            st.write(f"Lot Size: {signal['lot_size']}")
+            st.write(f"Recommended Lot Size: {signal['lot_size']}")
+
+            if signal['signal'] in ["BUY", "SELL"] and signal['confidence'] >= 90:
+                st.success(f"📢 High Accuracy {signal['signal']} Opportunity Detected!")
         else:
-            st.error("❌ Failed to get live data.")
+            st.error("❌ Failed to fetch data.")
 
 if __name__ == "__main__":
     run_ui()
