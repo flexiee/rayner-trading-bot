@@ -1,221 +1,268 @@
+# app.py
 import streamlit as st
-from datetime import datetime
-from tvDatafeed import TvDatafeed, Interval
 import pandas as pd
+import numpy as np
+import yfinance as yf
+from datetime import datetime
 import os
 
-tv = TvDatafeed()
+st.set_page_config(page_title="Rayner Style Risk Bot", layout="wide")
+st.title("📈 Rayner Style Risk Bot — ATR-based Risk Engine")
 
-MARKET_SYMBOLS = {
-    "EUR/USD": ("OANDA", "EURUSD"),
-    "GBP/JPY": ("OANDA", "GBPJPY"),
-    "USD/JPY": ("OANDA", "USDJPY"),
-    "AUD/USD": ("OANDA", "AUDUSD"),
-    "XAU/USD": ("OANDA", "XAUUSD"),
-    "BTC/USD": ("BINANCE", "BTCUSDT"),
-    "ETH/USD": ("BINANCE", "ETHUSDT"),
-    "Gold": ("OANDA", "XAUUSD"),
-    "Silver": ("OANDA", "XAGUSD"),
-    "Oil WTI": ("OANDA", "WTICOUSD"),
-    "NIFTY 50": ("NSE", "NIFTY"),
-    "BANKNIFTY": ("NSE", "BANKNIFTY"),
+# ---------------------------
+# MARKET SYMBOL CONFIG
+# (yfinance tickers where possible)
+# ---------------------------
+MARKETS = {
+    # Forex (yfinance uses pairs like EURUSD=X)
+    "EUR/USD": {"ticker": "EURUSD=X", "type": "forex", "pip": 0.0001, "pip_value_per_lot": 10},
+    "GBP/JPY": {"ticker": "GBPJPY=X", "type": "forex", "pip": 0.01, "pip_value_per_lot": 9.12},
+    "USD/JPY": {"ticker": "JPY=X", "type": "forex", "pip": 0.01, "pip_value_per_lot": 9.12},
+    "AUD/USD": {"ticker": "AUDUSD=X", "type": "forex", "pip": 0.0001, "pip_value_per_lot": 10},
+    # Commodities
+    "Gold (GC)": {"ticker": "GC=F", "type": "commodity", "pip": 0.1, "pip_value_per_lot": 100},
+    "Oil WTI (CL)": {"ticker": "CL=F", "type": "commodity", "pip": 0.01, "pip_value_per_lot": 10},
+    # Crypto
+    "BTC/USD": {"ticker": "BTC-USD", "type": "crypto", "pip": 1.0, "pip_value_per_lot": 1},
+    "ETH/USD": {"ticker": "ETH-USD", "type": "crypto", "pip": 0.1, "pip_value_per_lot": 1},
+    # Indices (common tickers)
+    "NIFTY 50": {"ticker": "^NSEI", "type": "index", "pip": 1.0, "pip_value_per_lot": 1},
+    "BANKNIFTY": {"ticker": "^NSEBANK", "type": "index", "pip": 1.0, "pip_value_per_lot": 1},
 }
 
-CATEGORIES = {
-    "Forex": ["EUR/USD", "GBP/JPY", "USD/JPY", "AUD/USD", "XAU/USD"],
-    "Crypto": ["BTC/USD", "ETH/USD"],
-    "Commodities": ["Gold", "Silver", "Oil WTI"],
-    "Indices": ["NIFTY 50", "BANKNIFTY"]
-}
-
-HISTORY_FILE = "signal_history.csv"
-if not os.path.exists(HISTORY_FILE):
-    pd.DataFrame(columns=[
-        "Datetime", "Market", "Signal", "Entry", "Stop Loss", "Take Profit",
-        "Confidence", "Lot Size", "Status"
-    ]).to_csv(HISTORY_FILE, index=False)
-
-def log_signal_history(market, signal_data):
-    row = {
-        "Datetime": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        "Market": market,
-        "Signal": signal_data["signal"],
-        "Entry": signal_data["entry"],
-        "Stop Loss": signal_data["stop_loss"],
-        "Take Profit": signal_data["take_profit"],
-        "Confidence": signal_data["confidence"],
-        "Lot Size": signal_data["lot_size"],
-        "Status": "pending"
-    }
-    df = pd.read_csv(HISTORY_FILE)
-    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-    df.to_csv(HISTORY_FILE, index=False)
-
-def update_signal_status(latest_price, market):
-    df = pd.read_csv(HISTORY_FILE)
-    updated = False
-    for i in df.index:
-        if df.loc[i, "Market"] == market and df.loc[i, "Status"] == "pending":
-            signal = df.loc[i, "Signal"]
-            entry = float(df.loc[i, "Entry"])
-            sl = float(df.loc[i, "Stop Loss"])
-            tp = float(df.loc[i, "Take Profit"])
-            if signal == "BUY":
-                if latest_price >= tp:
-                    df.loc[i, "Status"] = "success"
-                    updated = True
-                elif latest_price <= sl:
-                    df.loc[i, "Status"] = "fail"
-                    updated = True
-            elif signal == "SELL":
-                if latest_price <= tp:
-                    df.loc[i, "Status"] = "success"
-                    updated = True
-                elif latest_price >= sl:
-                    df.loc[i, "Status"] = "fail"
-                    updated = True
-    if updated:
-        df.to_csv(HISTORY_FILE, index=False)
-
-def get_live_data(symbol_info):
-    exchange, symbol = symbol_info
-    df = tv.get_hist(symbol=symbol, exchange=exchange, interval=Interval.in_1_minute, n_bars=20)
-    if df is None or df.empty:
+# ---------------------------
+# Helper functions
+# ---------------------------
+def fetch_ohlc(ticker, period="7d", interval="1m"):
+    """Fetch OHLC data from yfinance."""
+    try:
+        df = yf.download(tickers=ticker, period=period, interval=interval, progress=False, threads=False)
+        if df is None or df.empty:
+            return None
+        df = df.dropna()
+        return df
+    except Exception as e:
         return None
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    price = round(last['close'], 5)
-    prev_price = round(prev['close'], 5)
-    support = round(df['low'].min(), 5)
-    resistance = round(df['high'].max(), 5)
-    momentum = "strong" if abs(price - prev_price) > 0.0008 else "weak"
-    volatility = round(df['high'].std() * 10000)
-    trend = "uptrend" if price > df['close'].rolling(5).mean().iloc[-1] else "downtrend"
-    return {
-        "price": price,
-        "trend": trend,
-        "support": support,
-        "resistance": resistance,
-        "momentum": momentum,
-        "volatility": volatility,
-        "signal_strength": min(100, max(10, volatility)),
-        "change": price - prev_price
-    }
 
-def generate_signal(data, account_balance):
-    entry = data["price"]
-    risk_amount = account_balance * 0.01
-    pip_value = 10
-    pip_risk = risk_amount / pip_value
-    sl, tp = None, None
-    signal = "WAIT"
-    reasons = []
+def atr(df, period=14):
+    """Calculate ATR (True Range rolling mean)"""
+    high = df["High"]
+    low = df["Low"]
+    close = df["Close"]
+    tr1 = high - low
+    tr2 = (high - close.shift()).abs()
+    tr3 = (low - close.shift()).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(period, min_periods=1).mean()
+    return atr
 
-    if data["trend"] == "uptrend" and entry > data["support"]:
-        if data["momentum"] == "strong" and data["volatility"] > 50:
-            sl = entry - pip_risk
-            tp = entry + (entry - sl) * 3
-            signal = "BUY"
-            reasons.append("Strong uptrend breakout")
-    elif data["trend"] == "downtrend" and entry < data["resistance"]:
-        if data["momentum"] == "strong" and data["volatility"] > 50:
-            sl = entry + pip_risk
-            tp = entry - (sl - entry) * 3
-            signal = "SELL"
-            reasons.append("Strong downtrend breakout")
+def ema(df, span=20):
+    return df["Close"].ewm(span=span, adjust=False).mean()
 
-    lot_size = round(risk_amount / abs(entry - sl), 2) if sl else 0
+def detect_trend(df):
+    ma5 = df["Close"].rolling(5).mean().iloc[-1]
+    ma20 = df["Close"].rolling(20).mean().iloc[-1] if len(df) >= 20 else ema(df).iloc[-1]
+    return "uptrend" if ma5 > ma20 else "downtrend"
 
-    return {
-        "signal": signal,
-        "entry": round(entry, 5),
-        "stop_loss": round(sl, 5) if sl else None,
-        "take_profit": round(tp, 5) if tp else None,
-        "confidence": data["signal_strength"],
-        "reasons": reasons,
-        "risk_amount": round(risk_amount, 2),
-        "reward_amount": round(risk_amount * 3, 2),
-        "lot_size": lot_size
-    }
+def calc_sl_tp(entry, side, atr_val, market_info, rr=3.0, atr_mult=1.5):
+    """SL based on ATR × multiplier, TP = SL * RR"""
+    # For crypto we use percent-based approach to avoid massive values
+    mtype = market_info["type"]
+    pip = market_info["pip"]
+    if mtype == "crypto":
+        # SL = entry * (ATR_percent * atr_mult)
+        # approximate ATR percent
+        sl_distance = atr_val * atr_mult
+    else:
+        sl_distance = atr_val * atr_mult
+    if side == "BUY":
+        sl = entry - sl_distance
+        tp = entry + sl_distance * rr
+    else:
+        sl = entry + sl_distance
+        tp = entry - sl_distance * rr
+    # Round according to pip step
+    try:
+        step = pip
+        sl = round(sl / step) * step
+        tp = round(tp / step) * step
+    except Exception:
+        pass
+    return sl, tp, abs(sl - entry)
 
-def run_ui():
-    st.set_page_config(layout="wide", page_title="📈 Pro Trading Bot")
-    st.title("📈 Pro Trading Bot")
+def calculate_lot_size(account_balance, risk_percent, risk_amount_price_diff, market_info):
+    """Estimate lot size / units using risk amount and pip value."""
+    risk_amount_money = account_balance * (risk_percent / 100)
+    pip_value_per_lot = market_info.get("pip_value_per_lot", 1)
+    # avoid division by zero
+    if risk_amount_price_diff == 0:
+        return 0
+    # convert price diff to pips
+    pip = market_info.get("pip", 1)
+    pips = risk_amount_price_diff / pip
+    if pips == 0:
+        return 0
+    # number of standard lots (approx) = risk money / (pips * pip value per lot)
+    lots = risk_amount_money / (abs(pips) * pip_value_per_lot)
+    # For instruments where lot concept not meaningful (crypto/index), return units estimated
+    return round(lots, 4)
 
-    if "favorites" not in st.session_state:
-        st.session_state.favorites = []
-    if "selected_market" not in st.session_state:
-        st.session_state.selected_market = "EUR/USD"
+def save_signal_history(row, filename="signal_history.csv"):
+    cols = ["timestamp","market","signal","entry","sl","tp","confidence","risk_percent","lot_size"]
+    df_row = pd.DataFrame([row], columns=cols)
+    if not os.path.exists(filename):
+        df_row.to_csv(filename, index=False)
+    else:
+        df_row.to_csv(filename, mode="a", header=False, index=False)
 
-    account_balance = st.sidebar.number_input("💰 Account Balance", min_value=10, value=1000)
+def load_history(filename="signal_history.csv"):
+    if os.path.exists(filename):
+        return pd.read_csv(filename)
+    else:
+        return pd.DataFrame(columns=["timestamp","market","signal","entry","sl","tp","confidence","risk_percent","lot_size"])
 
-    movement_scores = {}
-    for market, info in MARKET_SYMBOLS.items():
-        data = get_live_data(info)
-        if data:
-            movement_scores[market] = abs(data["change"])
+# ---------------------------
+# UI: Sidebar (settings)
+# ---------------------------
+st.sidebar.header("⚙️ Account & Settings")
+account_balance = st.sidebar.number_input("Account Balance ($)", value=1000.0, min_value=1.0, step=50.0)
+risk_percent = st.sidebar.slider("Risk per trade (%)", 0.1, 5.0, 1.0, 0.1)
+timeframe = st.sidebar.selectbox("Chart timeframe", ["1m","5m","15m","1h","4h"], index=0)
+auto_refresh = st.sidebar.number_input("Auto-refresh every N seconds (0=off)", min_value=0, value=0, step=10)
+st.sidebar.markdown("---")
+st.sidebar.markdown("Made for manual execution. No auto-trading included.")
 
-    high_movement = sorted(movement_scores.items(), key=lambda x: x[1], reverse=True)[:3]
-    st.sidebar.subheader("🔥 High Movement Markets")
-    for market, delta in high_movement:
-        st.sidebar.write(f"{market}: {round(delta, 5)}")
+# Favorites (session)
+if "favorites" not in st.session_state:
+    st.session_state.favorites = []
 
-    st.sidebar.subheader("⭐ Watchlist")
-    for fav in st.session_state.favorites:
-        exch, sym = MARKET_SYMBOLS[fav]
-        df = tv.get_hist(sym, exch, Interval.in_1_minute, n_bars=1)
-        if df is not None and not df.empty:
-            price = df.iloc[-1]["close"]
-            st.sidebar.markdown(f"{fav}: {round(price, 5)}")
+# ---------------------------
+# Left column: favorites, high movement
+# ---------------------------
+col1, col2 = st.columns([1,3])
 
-    st.sidebar.subheader("📂 Market Categories")
-    category = st.sidebar.selectbox("Choose Category", list(CATEGORIES.keys()))
-    for market in CATEGORIES[category]:
-        col1, col2 = st.columns([8, 1])
-        if col1.button(market):
-            st.session_state.selected_market = market
-        if col2.button("⭐" if market in st.session_state.favorites else "☆", key=market):
-            if market in st.session_state.favorites:
-                st.session_state.favorites.remove(market)
-            else:
-                st.session_state.favorites.append(market)
-
-    selected = st.session_state.selected_market
-    exch, sym = MARKET_SYMBOLS[selected]
-    st.subheader(f"📊 {selected} Chart")
-    st.components.v1.iframe(f"https://s.tradingview.com/widgetembed/?symbol={exch}:{sym}&interval=1&theme=dark", height=400)
-
-    if st.button("🔄 Refresh Signal"):
-        data = get_live_data((exch, sym))
-        if data:
-            signal = generate_signal(data, account_balance)
-            log_signal_history(selected, signal)
-            update_signal_status(data["price"], selected)
-
-            st.subheader("📌 Market Snapshot")
-            st.write(f"Trend: {data['trend']}")
-            st.write(f"Momentum: {data['momentum']}")
-            st.write(f"Volatility: {data['volatility']}")
-            st.write(f"Support: {data['support']} | Resistance: {data['resistance']}")
-
-            st.subheader("✅ Signal")
-            st.write(f"Signal: {signal['signal']}")
-            st.progress(signal["confidence"])
-            st.write(f"Entry: {signal['entry']} | SL: {signal['stop_loss']} | TP: {signal['take_profit']}")
-            st.write(f"Risk: ${signal['risk_amount']} | Reward: ${signal['reward_amount']}")
-            st.write(f"Recommended Lot Size: {signal['lot_size']}")
-            st.caption(f"Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        else:
-            st.error("❌ Data fetch failed.")
+with col1:
+    st.subheader("🔥 High Movement Markets")
+    # compute movement using past N candles' std dev for each market
+    movement = {}
+    for m, info in MARKETS.items():
+        dfm = fetch_ohlc(info["ticker"], period="2d", interval=timeframe)
+        if dfm is not None and not dfm.empty:
+            movement[m] = float((dfm["Close"].pct_change().abs().sum())*100)
+    sorted_m = sorted(movement.items(), key=lambda x: x[1], reverse=True)[:5]
+    for m, score in sorted_m:
+        st.write(f"{m}: {round(score,3)}")
 
     st.markdown("---")
-    st.subheader("📜 Signal History")
-    try:
-        df = pd.read_csv(HISTORY_FILE)
-        df_sorted = df.sort_values(by="Datetime", ascending=False)
-        st.dataframe(df_sorted, use_container_width=True)
-    except:
-        st.info("No signal history yet.")
+    st.subheader("⭐ Watchlist / Favorites")
+    for m in MARKETS.keys():
+        fav = "⭐" if m in st.session_state.favorites else "☆"
+        if st.button(f"{fav} {m}", key=f"fav_{m}"):
+            if m in st.session_state.favorites:
+                st.session_state.favorites.remove(m)
+            else:
+                st.session_state.favorites.append(m)
+    st.write("Your favorites:", st.session_state.favorites)
 
-if __name__ == "__main__":
-    run_ui()
+# ---------------------------
+# Main column: select market & show chart
+# ---------------------------
+with col2:
+    st.subheader("Select Market")
+    market_choice = st.selectbox("Market", list(MARKETS.keys()))
+    market_info = MARKETS[market_choice]
+    ticker = market_info["ticker"]
+
+    # TradingView iframe embed (visual only)
+    st.markdown("### Live chart")
+    symbol_for_tv = ticker.replace("^","").replace("=X","").replace("-USD","USD").replace("BTC-USD","BINANCE:BTCUSDT")
+    # Use a safe TradingView URL; for many tickers TradingView accepts "OANDA:EURUSD"
+    iframe_url = f"https://s.tradingview.com/widgetembed/?symbol={ticker}&interval={timeframe}&theme=dark"
+    st.components.v1.iframe(f"https://s.tradingview.com/widgetembed/?frameElementId=tradingview_{symbol_for_tv}&symbol={ticker}&interval=1&hidesidetoolbar=1&symboledit=1&saveimage=1&toolbarbg=f1f3f6&studies=[]&theme=dark&style=1&timezone=Etc%2FUTC&withdateranges=1&hidevolume=0", height=480)
+
+    # Manual generate button
+    if st.button("🔮 Generate Signal"):
+        with st.spinner("Fetching data..."):
+            # Fetch OHLC for analysis
+            df = fetch_ohlc(ticker, period="7d", interval=timeframe)
+            if df is None or df.empty:
+                st.error("Unable to fetch live OHLC data for the selected market/timeframe. Try again or choose a different timeframe.")
+            else:
+                # compute indicators
+                atr_series = atr(df, period=14)
+                atr_val = float(atr_series.iloc[-1])
+                trend = detect_trend(df)
+                momentum = "strong" if abs(df["Close"].pct_change().iloc[-1]) > 0.001 else "weak"
+                support = float(df["Low"].rolling(20, min_periods=1).min().iloc[-1])
+                resistance = float(df["High"].rolling(20, min_periods=1).max().iloc[-1])
+                entry = float(df["Close"].iloc[-1])
+
+                # Decide side using simple Rayner-style breakout logic (preserve user's original technique)
+                side = "WAIT"
+                confidence = 50
+                if trend == "uptrend" and entry > support and momentum == "strong" and atr_val > 0:
+                    side = "BUY"
+                    confidence = min(100, int(50 + (atr_val*100)))
+                elif trend == "downtrend" and entry < resistance and momentum == "strong" and atr_val > 0:
+                    side = "SELL"
+                    confidence = min(100, int(50 + (atr_val*100)))
+                else:
+                    side = "WAIT"
+                    confidence = 40
+
+                # Calculate SL/TP using ATR-based engine and per market pip rounding
+                sl, tp, sl_distance = calc_sl_tp(entry, side if side != "WAIT" else "BUY", atr_val, market_info, rr=3.0, atr_mult=1.5)
+                if side == "WAIT":
+                    st.warning("No clear signal based on current rules (WAIT). You can inspect snapshot below.")
+                else:
+                    # recommended lot size
+                    lot_size = calculate_lot_size(account_balance, risk_percent, sl_distance, market_info)
+                    st.success(f"Signal: {side}")
+                    st.markdown(f"- **Trend:** {trend}")
+                    st.markdown(f"- **Momentum:** {momentum}")
+                    st.markdown(f"- **Volatility (ATR):** {round(atr_val,6)}")
+                    st.markdown(f"- **Support:** {round(support,6)} | **Resistance:** {round(resistance,6)}")
+                    st.markdown(f"**Entry:** {round(entry,6)}  |  **SL:** {sl}  |  **TP:** {tp}")
+                    st.markdown(f"**Risk per trade:** {risk_percent}% (${round(account_balance * risk_percent/100,2)})")
+                    st.markdown(f"**Recommended lots (approx):** {lot_size}")
+                    st.progress(min(confidence,100))
+
+                    # save to history
+                    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                    row = [timestamp, market_choice, side, entry, sl, tp, confidence, risk_percent, lot_size]
+                    save_signal_history(row)
+                    st.info("Signal saved to history.")
+
+    # Show a small market snapshot if not generating
+    st.markdown("---")
+    st.subheader("Market Snapshot (quick)")
+    dfq = fetch_ohlc(ticker, period="2d", interval=timeframe)
+    if dfq is None or dfq.empty:
+        st.write("No quick data available.")
+    else:
+        atr_q = float(atr(dfq).iloc[-1])
+        trend_q = detect_trend(dfq)
+        last_price = float(dfq["Close"].iloc[-1])
+        st.write(f"Price: {round(last_price,6)}  |  Trend: {trend_q}  |  ATR: {round(atr_q,6)}")
+
+# ---------------------------
+# Right column: History table
+# ---------------------------
+col3 = st.columns([1])[0]
+st.markdown("---")
+st.subheader("📜 Signal History")
+history_df = load_history()
+if history_df.empty:
+    st.write("No history yet.")
+else:
+    st.dataframe(history_df.sort_values("timestamp", ascending=False).reset_index(drop=True), height=300)
+
+# ---------------------------
+# Footer: small tips
+# ---------------------------
+st.markdown("---")
+st.caption("This app provides signals for manual trading only. Always confirm with your own analysis. Built with yfinance (data may be delayed).")
+
+# Auto-refresh (if enabled) - simple rerun
+if auto_refresh and auto_refresh > 0:
+    st.experimental_rerun()
