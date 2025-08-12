@@ -1,3 +1,4 @@
 streamlit
-tvDatafeed @ git+https://github.com/rongardF/tvdatafeed.git
 pandas
+numpy
+yfinance
