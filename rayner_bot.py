@@ -33,78 +33,75 @@ def calculate_indicators(df):
     df['RSI'] = compute_rsi(df['Close'], 14)
     return df
 
-def generate_signal_with_tp_sl(df, rr_ratio=2, sl_pips=20):
-    """
-    rr_ratio = Risk:Reward ratio (e.g., 2 means TP is twice the SL distance)
-    sl_pips = Stop Loss in pips
-    """
+def generate_signal(df, rr_ratio=2):
     if df.empty:
-        return "No data", None, None
+        return "No data", None, None, None
 
     latest = df.iloc[-1]
-    entry_price = latest['Close']
+    entry = latest['Close']
+    atr = (df['High'] - df['Low']).rolling(window=14).mean().iloc[-1]  # ATR for volatility
 
     if latest['EMA20'] > latest['EMA50'] and latest['RSI'] < 70:
         direction = "BUY"
-        sl = entry_price - (sl_pips * pip_value(entry_price))
-        tp = entry_price + (sl_pips * rr_ratio * pip_value(entry_price))
+        sl = entry - atr
+        tp = entry + atr * rr_ratio
     elif latest['EMA20'] < latest['EMA50'] and latest['RSI'] > 30:
         direction = "SELL"
-        sl = entry_price + (sl_pips * pip_value(entry_price))
-        tp = entry_price - (sl_pips * rr_ratio * pip_value(entry_price))
+        sl = entry + atr
+        tp = entry - atr * rr_ratio
     else:
         direction = "HOLD"
-        sl, tp = None, None
+        sl = None
+        tp = None
 
-    return direction, sl, tp
-
-def pip_value(price):
-    """Rough pip value calc for Forex pairs"""
-    if price < 10:  # JPY pairs
-        return 0.01
-    return 0.0001
+    return direction, entry, sl, tp
 
 # ==============================
 # UI Layout
 # ==============================
-st.title("📈 Rayner Bot - Trading Assistant (with TP/SL)")
-st.markdown("Get real-time trading signals with **EMA + RSI** strategy and automatic TP/SL calculation.")
+st.title("📈 Rayner Bot - Trading Assistant")
+st.markdown("Get real-time trading signals using **EMA** and **RSI** strategy with **TP/SL** levels and TradingView live chart.")
 
-col1, col2, col3, col4, col5 = st.columns(5)
+col1, col2, col3 = st.columns(3)
 
 with col1:
-    symbol = st.text_input("Enter Market Symbol", "EURUSD=X")
+    symbol = st.text_input("Enter Market Symbol", "EURUSD=X")  # Forex example
 with col2:
     interval = st.selectbox("Time Interval", ["1m", "5m", "15m", "30m", "1h", "1d"])
 with col3:
     period = st.selectbox("Data Period", ["1d", "5d", "1mo", "3mo", "6mo", "1y"])
-with col4:
-    rr_ratio = st.number_input("Risk-Reward Ratio", min_value=1.0, max_value=5.0, value=2.0, step=0.5)
-with col5:
-    sl_pips = st.number_input("Stop Loss (pips)", min_value=5, max_value=200, value=20, step=5)
 
 # ==============================
 # Signal Generation
 # ==============================
 if st.button("Generate Signal"):
     df = get_data(symbol, interval, period)
-    
+
     if not df.empty:
         df = calculate_indicators(df)
-        signal, sl, tp = generate_signal_with_tp_sl(df, rr_ratio, sl_pips)
-        
+        signal, entry, sl, tp = generate_signal(df)
+
         # Display Signal & TP/SL
         st.subheader(f"📊 Signal: **{signal}**")
         if signal != "HOLD":
-            st.write(f"**Entry Price:** {df.iloc[-1]['Close']:.5f}")
-            st.write(f"**Stop Loss:** {sl:.5f}")
-            st.write(f"**Take Profit:** {tp:.5f}")
-            st.write(f"**Risk-Reward Ratio:** {rr_ratio}:1")
-        
+            st.write(f"**Entry Price:** {entry:.5f}")
+            st.write(f"**Stop Loss (SL):** {sl:.5f}")
+            st.write(f"**Take Profit (TP):** {tp:.5f}")
+            st.write(f"**Risk-Reward Ratio:** 1:2")
+
         # Show Last 5 Data Points
         st.dataframe(df.tail(5))
-        
+
         # Plot Chart
         st.line_chart(df[['Close', 'EMA20', 'EMA50']])
+
+        # ==============================
+        # TradingView Live Chart Embed
+        # ==============================
+        tradingview_symbol = symbol.replace("=X", "")  # Adjust for forex
+        st.markdown(f"""
+            <iframe src="https://s.tradingview.com/widgetembed/?symbol={tradingview_symbol}&interval=1&hidesidetoolbar=1&symboledit=1&saveimage=1&toolbarbg=f1f3f6&studies=[]&theme=dark&style=1&timezone=Etc/UTC&studies_overrides={{}}&overrides={{}}&enabled_features=[]&disabled_features=[]"
+            width="100%" height="500" frameborder="0" allowtransparency="true" scrolling="no"></iframe>
+        """, unsafe_allow_html=True)
     else:
         st.error("No data available. Please check the symbol or parameters.")
