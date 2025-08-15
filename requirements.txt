@@ -1,4 +1,4 @@
-streamlit==1.26.0
-pandas>=1.4
+streamlit>=1.20
+pandas
 numpy
-tvDatafeed @ git+https://github.com/StreamAlpha/tvdatafeed.git@master
+yfinance
