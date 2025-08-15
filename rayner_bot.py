@@ -2,251 +2,211 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import yfinance as yf
 from datetime import datetime
-from tvDatafeed import TvDatafeed, Interval
+
+st.set_page_config(page_title="Rayner Bot (yfinance)", layout="wide")
+st.title("📈 Rayner Bot — yfinance version (Stable for Streamlit Cloud)")
+
+# ---------- Markets mapping (for iframe vs yfinance symbol) ----------
+MARKETS = {
+    "EUR/USD": {"yf": "EURUSD=X", "tv": "OANDA:EURUSD"},
+    "GBP/JPY": {"yf": "GBPJPY=X", "tv": "OANDA:GBPJPY"},
+    "USD/JPY": {"yf": "JPY=X",    "tv": "OANDA:USDJPY"},   # fallback
+    "AUD/USD": {"yf": "AUDUSD=X","tv": "OANDA:AUDUSD"},
+    "XAU/USD": {"yf": "GC=F",    "tv": "OANDA:XAUUSD"},   # gold futures symbol for yfinance
+    "BTC/USD": {"yf": "BTC-USD", "tv": "BINANCE:BTCUSDT"},
+    "ETH/USD": {"yf": "ETH-USD", "tv": "BINANCE:ETHUSDT"},
+    "NIFTY 50": {"yf": "^NSEI",  "tv": "NSE:NIFTY"},      # approximate
+    "BANKNIFTY": {"yf": "^NSEBANK","tv": "NSE:BANKNIFTY"},
+}
 
 # ---------- Helpers ----------
-def safe_series(series_like):
-    """
-    Ensure series_like becomes a 1-D pandas Series suitable for indicators.
-    """
-    if series_like is None:
+def safe_series(x):
+    if isinstance(x, pd.Series):
+        return x.astype(float)
+    try:
+        return pd.Series(x).astype(float)
+    except Exception:
         return pd.Series(dtype=float)
-    if isinstance(series_like, pd.DataFrame):
-        # prefer a numeric column if present, else first column
-        numeric_cols = [c for c in series_like.columns if np.issubdtype(series_like[c].dtype, np.number)]
-        if numeric_cols:
-            s = series_like[numeric_cols[0]]
-        else:
-            s = series_like.iloc[:, 0]
-    elif isinstance(series_like, pd.Series):
-        s = series_like
-    else:
-        s = pd.Series(series_like)
-    # flatten any multiindex columns etc.
-    return s.astype(float).copy()
 
 def compute_rsi(series, period=14):
     s = safe_series(series).dropna()
-    if s.empty or len(s) < period + 1:
+    if len(s) < period + 1:
         return pd.Series(dtype=float)
     delta = s.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    # Wilder's smoothing
-    avg_gain = gain.rolling(window=period, min_periods=period).mean()
-    avg_loss = loss.rolling(window=period, min_periods=period).mean()
-    # for first non-null use simple ratio, then fill using EMA approach
+    avg_gain = gain.rolling(period, min_periods=period).mean()
+    avg_loss = loss.rolling(period, min_periods=period).mean()
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
-    # if initial values NaN because of rolling, compute manually for first valid index
-    rsi = rsi.fillna(method='bfill')
     return rsi
 
-def normalize_df_cols(df):
-    df = df.copy()
-    # lowercase column names
-    df.columns = [c.lower() for c in df.columns]
-    return df
-
 def atr(df, period=14):
-    """
-    Simple ATR using high, low, close. df must contain 'high','low','close'
-    """
-    df = normalize_df_cols(df)
-    if not all(k in df.columns for k in ('high', 'low', 'close')):
+    dfc = df.copy()
+    if not all(k in dfc.columns for k in ['High','Low','Close','Adj Close']) and not all(k.lower() in dfc.columns for k in ['high','low','close']):
+        # try lowercase
+        dfc.columns = [c.lower() for c in dfc.columns]
+    # ensure names
+    try:
+        high = safe_series(dfc['High'] if 'High' in dfc.columns else dfc['high'])
+        low = safe_series(dfc['Low'] if 'Low' in dfc.columns else dfc['low'])
+        close = safe_series(dfc['Close'] if 'Close' in dfc.columns else dfc['close'])
+    except Exception:
         return pd.Series(dtype=float)
-    high = safe_series(df['high'])
-    low = safe_series(df['low'])
-    close = safe_series(df['close'])
     prev_close = close.shift(1)
     tr1 = high - low
     tr2 = (high - prev_close).abs()
     tr3 = (low - prev_close).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_series = tr.rolling(window=period, min_periods=period).mean()
-    return atr_series
+    return tr.rolling(period, min_periods=period).mean()
 
-# ---------- TradingView / Data feed ----------
-tv = None
-try:
-    tv = TvDatafeed()  # guest mode: leave blank. In Cloud ensure tvDatafeed installed.
-except Exception as e:
-    # We'll show a message in UI if tv is None
-    tv = None
-
-# Map a market key to (exchange, symbol_for_tvdata, tradingview_symbol_for_iframe)
-MARKETS = {
-    "EUR/USD": ("OANDA", "EURUSD", "OANDA:EURUSD"),
-    "GBP/JPY": ("OANDA", "GBPJPY", "OANDA:GBPJPY"),
-    "USD/JPY": ("OANDA", "USDJPY", "OANDA:USDJPY"),
-    "AUD/USD": ("OANDA", "AUDUSD", "OANDA:AUDUSD"),
-    "XAU/USD": ("OANDA", "XAUUSD", "OANDA:XAUUSD"),
-    "BTC/USD": ("BINANCE", "BTCUSDT", "BINANCE:BTCUSDT"),
-    "ETH/USD": ("BINANCE", "ETHUSDT", "BINANCE:ETHUSDT"),
-    # Add more maps as needed
-}
-
-# ---------- Signal Logic ----------
 def generate_signal_from_df(df):
-    """
-    Returns: dict with keys: signal ('BUY'/'SELL'/'WAIT'),
-             confidence (int 0-100+), sl, tp, rr_ratio
-    """
-    out = {"signal": "WAIT", "confidence": 0, "sl": None, "tp": None, "rr": None, "reasons": []}
-    if df is None or df.empty:
+    out = {"signal":"WAIT","confidence":0,"entry":None,"sl":None,"tp":None,"rr":None,"reasons":[]}
+    if df is None or df.empty or 'Close' not in df.columns and 'close' not in df.columns:
+        return out
+    # normalize
+    df2 = df.copy()
+    cols_lower = [c.lower() for c in df2.columns]
+    df2.columns = cols_lower
+    close = safe_series(df2['close'])
+    if len(close) < 20:
         return out
 
-    df = normalize_df_cols(df)
-    # ensure we have close/open/high/low
-    if 'close' not in df.columns or len(df) < 20:
-        return out
-
-    close = safe_series(df['close'])
-    rsi = compute_rsi(close, period=14)
     ema9 = close.ewm(span=9, adjust=False).mean()
     ema21 = close.ewm(span=21, adjust=False).mean()
-    macd_line = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
-    signal_line = macd_line.ewm(span=9, adjust=False).mean()
-    atr_series = atr(df, period=14)
+    rsi = compute_rsi(close, 14)
+    macd = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
+    macd_signal = macd.ewm(span=9, adjust=False).mean()
+    atr_series = atr(df2, 14)
 
-    # Last values
     try:
-        last_rsi = float(rsi.iloc[-1])
-        last_ema9 = float(ema9.iloc[-1])
-        last_ema21 = float(ema21.iloc[-1])
-        last_macd = float(macd_line.iloc[-1])
-        last_macd_signal = float(signal_line.iloc[-1])
+        last = close.iloc[-1]
+        last_ema9 = ema9.iloc[-1]
+        last_ema21 = ema21.iloc[-1]
+        last_rsi = float(rsi.iloc[-1]) if not rsi.empty else np.nan
+        last_macd = float(macd.iloc[-1])
+        last_macd_sig = float(macd_signal.iloc[-1])
         last_atr = float(atr_series.iloc[-1]) if not atr_series.empty else np.nan
-        last_close = float(close.iloc[-1])
     except Exception:
         return out
 
     score = 0
-    # EMA trend
     if last_ema9 > last_ema21:
-        score += 10
-        out["reasons"].append("EMA short above EMA long (trend up)")
+        score += 10; out["reasons"].append("EMA9 > EMA21 (trend up)")
     else:
-        score -= 5
-        out["reasons"].append("EMA short below EMA long (trend down)")
+        score -= 6; out["reasons"].append("EMA9 < EMA21 (trend down)")
 
-    # RSI confirmation
-    if last_rsi < 35:
-        score += 12
-        out["reasons"].append("RSI oversold")
-    elif last_rsi > 65:
-        score -= 8
-        out["reasons"].append("RSI overbought")
+    if not np.isnan(last_rsi):
+        if last_rsi < 35:
+            score += 12; out["reasons"].append("RSI low (oversold)")
+        elif last_rsi > 65:
+            score -= 8; out["reasons"].append("RSI high (overbought)")
 
-    # MACD confirmation
-    if last_macd > last_macd_signal:
-        score += 8
-        out["reasons"].append("MACD bullish")
+    if last_macd > last_macd_sig:
+        score += 6; out["reasons"].append("MACD bullish")
     else:
-        score -= 6
-        out["reasons"].append("MACD bearish")
+        score -= 4; out["reasons"].append("MACD bearish")
 
-    # Build final signal
+    # decide
     if score >= 10:
-        out["signal"] = "BUY"
+        out["signal"]="BUY"
     elif score <= -5:
-        out["signal"] = "SELL"
+        out["signal"]="SELL"
     else:
-        out["signal"] = "WAIT"
+        out["signal"]="WAIT"
 
-    # Confidence: scale and clip 10..120
-    out["confidence"] = int(max(10, min(120, 50 + score * 4)))
+    out["confidence"] = int(max(10, min(120, 50 + score*4)))
 
-    # Set SL/TP based on recent ATR or fixed fallback
+    # build TP/SL using ATR
     if not np.isnan(last_atr) and last_atr > 0:
-        # choose a multiple for SL and TP (market specific can be tuned)
-        sl = last_atr * 1.2
-        tp = sl * 2  # 1:2 base target
+        sl_points = last_atr * 1.2
+        tp_points = sl_points * 2  # 1:2
     else:
-        sl = (last_close * 0.0010) if last_close > 0 else 10  # fallback small SL
-        tp = sl * 2
+        # fallback tiny
+        sl_points = last * 0.001
+        tp_points = sl_points * 2
 
-    # finalize
-    out["sl"] = float(round(last_close - sl, 5)) if out["signal"] == "BUY" else float(round(last_close + sl, 5))
-    out["tp"] = float(round(last_close + tp, 5)) if out["signal"] == "BUY" else float(round(last_close - tp, 5))
-    out["rr"] = round((tp) / (sl if sl != 0 else 1), 2)
+    if out["signal"] == "BUY":
+        out["entry"] = float(round(last,5))
+        out["sl"] = float(round(last - sl_points, 5))
+        out["tp"] = float(round(last + tp_points, 5))
+    elif out["signal"] == "SELL":
+        out["entry"] = float(round(last,5))
+        out["sl"] = float(round(last + sl_points, 5))
+        out["tp"] = float(round(last - tp_points, 5))
+    else:
+        out["entry"] = float(round(last,5))
+        out["sl"] = None
+        out["tp"] = None
 
+    try:
+        rr = abs((out["tp"] - out["entry"]) / (out["entry"] - out["sl"])) if out["sl"] and out["tp"] else None
+        out["rr"] = round(rr,2) if rr else None
+    except Exception:
+        out["rr"] = None
     return out
 
 # ---------- UI ----------
-st.set_page_config(page_title="Rayner Bot (Fixed)", layout="wide")
-st.markdown("# 📈 Rayner Bot — Fixed & Robust")
-
-col1, col2 = st.columns([1,3])
-with col1:
-    st.subheader("Settings")
-    market = st.selectbox("Market", list(MARKETS.keys()))
-    timeframe = st.selectbox("Interval", ["1m","5m","15m","30m","60m"])
+left, right = st.columns([1,2])
+with left:
+    st.header("Account & Settings")
     account_balance = st.number_input("Account balance ($)", value=1000.0, step=10.0)
-    risk_pct = st.slider("Risk % per trade", 0.1, 5.0, 1.0, 0.1)
-    st.write("Press Generate Signal to fetch live data & analyze.")
+    risk_pct = st.slider("Risk per trade (%)", 0.1, 5.0, 1.0, 0.1)
+    market = st.selectbox("Choose Market", list(MARKETS.keys()), index=0)
+    interval = st.selectbox("Interval (for chart)", ["1m","5m","15m","30m","1h","1d"], index=0)
 
-with col2:
-    st.subheader("Live Chart & Signal")
-    # TradingView iframe area
-    tv_symbol = MARKETS[market][2] if market in MARKETS else None
-    iframe_html = ""
+with right:
+    st.header("Live Chart")
+    tv_symbol = MARKETS.get(market, {}).get("tv", None)
+    # tradingview iframe embed (public widget)
     if tv_symbol:
-        iframe_html = f"""<iframe src="https://s.tradingview.com/widgetembed/?frameElementId=tradingview_{tv_symbol.replace(':','_')}&symbol={tv_symbol}&interval={timeframe}&hidesidetoolbar=1&theme=dark" width="900" height="450" frameborder="0"></iframe>"""
+        iframe = f"""<iframe src="https://s.tradingview.com/widgetembed/?symbol={tv_symbol}&interval={interval}&theme=dark&hidesidetoolbar=1" width="900" height="480" frameborder="0"></iframe>"""
+        st.components.v1.html(iframe, height=520)
     else:
-        iframe_html = "<div style='color:yellow'>No frame available for this market.</div>"
+        st.info("No TradingView symbol for this market.")
 
-    st.components.v1.html(iframe_html, height=480)
-
-    if st.button("Generate Signal"):
-        if tv is None:
-            st.error("tvDatafeed not initialized. Install and configure tvDatafeed in the environment.")
-        else:
-            exch, sym_tvdata, _ = MARKETS[market]
-            # fetch data carefully
-            try:
-                df = tv.get_hist(symbol=sym_tvdata, exchange=exch, interval=getattr(Interval, f"in_{timeframe}"), n_bars=300)
-            except Exception as e:
-                st.error(f"Error fetching data from tvDatafeed: {e}")
-                df = None
-
+# Generate Signal
+st.markdown("---")
+if st.button("Generate Signal"):
+    st.info("Fetching OHLC from yfinance and computing indicators...")
+    yf_sym = MARKETS.get(market, {}).get("yf", None)
+    if yf_sym is None:
+        st.error("No yfinance symbol found for this market.")
+    else:
+        try:
+            # Use interval -> map to yfinance period/interval accepted values
+            # yfinance handles 1m only for recent period; get last 500 bars for safety
+            yf_interval = interval if interval != "1h" else "60m"
+            df = yf.download(yf_sym, period="7d", interval=yf_interval, progress=False)
             if df is None or df.empty:
-                st.error("No data or too few candles. Try different interval / check tvDatafeed credentials.")
+                st.error("No data or too few candles. Try a different market or check symbol.")
             else:
-                # some tvDatafeed returns dataframe with columns e.g. ['open','high','low','close','volume']
-                df_norm = normalize_df_cols(df)
-                sig = generate_signal_from_df(df_norm)
-                st.markdown("### Signal Result")
-                st.write(f"**Signal:** {sig['signal']}  |  **Confidence:** {sig['confidence']}%")
-                st.write(f"Entry ~ {float(df_norm['close'].iloc[-1]):.5f}")
-                st.write(f"Stop Loss (price): {sig['sl']}  |  Take Profit (price): {sig['tp']}  |  R:R: {sig['rr']}:1")
+                sig = generate_signal_from_df(df)
+                st.success(f"Signal: **{sig['signal']}**  | Confidence: {sig['confidence']}%")
+                st.write(f"Entry: {sig['entry']}, SL: {sig['sl']}, TP: {sig['tp']}, R:R: {sig['rr']}")
                 st.write("Reasons:")
                 for r in sig["reasons"]:
                     st.write("- " + r)
 
-                # risk & lot calc (assuming pip value simplified)
-                # pip_value placeholder: for Forex 1 pip=10 USD per lot (for simplicity)
-                pip_value = 10.0
-                # compute stop_loss in pips approx (for Forex small pair: difference * 10000)
-                try:
-                    last_price = float(df_norm['close'].iloc[-1])
-                    sl_in_price = abs(last_price - sig['sl'])
-                    # approximate pips: if last_price > 10 (like indices), scale different; keep a simple conversion:
-                    if last_price >= 100:  # indices/crypto large price
-                        pip_est = sl_in_price  # use price units as 'pips' for simplicity
+                # risk/lot calc (very simplified)
+                if sig['sl'] and sig['entry']:
+                    price_diff = abs(sig['entry'] - sig['sl'])
+                    # pip value heuristic: forex small pairs => 10$/pip for 1 lot, else scale
+                    pip_value = 10.0
+                    if sig['entry'] >= 100:  # indices/crypto large price -> treat differently
+                        pip_equiv = price_diff  # use price diff as pip-equivalent
                     else:
-                        pip_est = sl_in_price * 10000
-                except Exception:
-                    pip_est = 1.0
-
-                risk_amount, lot_size = (account_balance * (risk_pct/100)), 0
-                if pip_est > 0:
-                    lot_size = round((account_balance * (risk_pct/100)) / (pip_est * pip_value), 4)
-                st.write(f"Risk Amount: ${risk_amount:.2f}   |   Suggested Lot Size: {lot_size}")
-
-                # show last few candles
+                        pip_equiv = price_diff * 10000
+                    risk_amount = account_balance * (risk_pct / 100)
+                    lot_size = 0
+                    if pip_equiv > 0:
+                        lot_size = round(risk_amount / (pip_equiv * pip_value), 4)
+                    st.write(f"Risk Amount: ${risk_amount:.2f} | Suggested lot size (approx): {lot_size}")
                 st.markdown("#### Last candles (tail)")
-                st.dataframe(df_norm.tail(8))
+                st.dataframe(df.tail(8))
+        except Exception as e:
+            st.error(f"Error fetching/processing data: {e}")
 
-st.caption(f"Last updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+st.caption(f"App time (UTC): {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
