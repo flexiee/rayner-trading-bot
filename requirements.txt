@@ -1,4 +1,5 @@
 streamlit>=1.31
-yfinance>=0.2.40
 pandas>=2.1
 numpy>=1.26
+yfinance>=0.2.40
+tvDatafeed>=0.1.8   # optional; if you don't use tvDatafeed, yfinance fallback will be used
