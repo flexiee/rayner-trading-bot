@@ -1,14 +1,8 @@
 # app.py
-# Pro Trading Bot — Single-file Streamlit app
-# - Real-time Binance public data (no API required)
-# - Multi-timeframe confirmation (1m -> 5m,15m)
-# - EMA20/50/200, RSI14, MACD12/26/9, ATR14, Bollinger z-score, Candles
-# - Fixed Risk:Reward 1:3 (TP set to ensure RR)
-# - Position sizing (account balance + risk%)
-# - Backtest (simple simulator), Market Scanner
-# - Telegram alerts (optional)
-# - Signal history saved to bot_data/signal_history.csv
-# - Uses Option A iframe fix for TradingView embed
+# Pro Trading Bot — Single-file Streamlit app (no background image)
+# Real-time data (Binance), Multi-TF confirmation, fixed RR=1:3, risk sizing,
+# Backtest, Market Scanner, Telegram alerts, Signal history.
+# NOTE: Educational use only.
 
 import os, math, time
 from datetime import datetime
@@ -18,14 +12,16 @@ import pandas as pd
 import streamlit as st
 
 # ---------------------------
-# Config & persistence
+# App setup & storage
 # ---------------------------
-st.set_page_config(page_title="Pro Trading Bot — Real-time (1:3 RR)", layout="wide")
+st.set_page_config(page_title="Pro Trading Bot — Live (1:3 RR)", layout="wide")
 DATA_DIR = os.path.join(os.getcwd(), "bot_data")
 os.makedirs(DATA_DIR, exist_ok=True)
 HISTORY_FILE = os.path.join(DATA_DIR, "signal_history.csv")
 
-# Markets (Binance symbol, friendly label, type)
+# ---------------------------
+# Markets (Binance spot symbols)
+# ---------------------------
 MARKETS = {
     "BTC/USDT": {"sym": "BTCUSDT", "type": "crypto"},
     "ETH/USDT": {"sym": "ETHUSDT", "type": "crypto"},
@@ -34,19 +30,19 @@ MARKETS = {
     "ADA/USDT": {"sym": "ADAUSDT", "type": "crypto"},
 }
 
-# Strategy defaults (keys used by code)
+# Strategy defaults
 DEFAULTS = {
     "ema_short": 20, "ema_long": 50, "ema_trend": 200,
     "rsi_p": 14, "rsi_oversold": 30, "rsi_overbought": 70,
     "macd_fast": 12, "macd_slow": 26, "macd_sig": 9,
     "atr_p": 14, "bb_p": 20,
-    "rr_target": 3.0,
-    "min_confidence": 70,
-    "min_volume_ratio": 0.5
+    "rr_target": 3.0,              # Fixed 1:3 RR
+    "min_confidence": 70,          # Only show high-quality signals
+    "min_volume_ratio": 0.5        # Current vol >= 50% of 20-bar avg
 }
 
 # ---------------------------
-# Binance public klines fetch
+# Binance public klines
 # ---------------------------
 BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
 
@@ -59,20 +55,17 @@ def fetch_klines_binance(symbol: str, interval: str = "1m", limit: int = 1000) -
         df = pd.DataFrame(data, columns=[
             "open_time","Open","High","Low","Close","Volume","close_time","q","n","taker_base","taker_quote","ignore"
         ])
-        df["Open"] = pd.to_numeric(df["Open"], errors="coerce")
-        df["High"] = pd.to_numeric(df["High"], errors="coerce")
-        df["Low"] = pd.to_numeric(df["Low"], errors="coerce")
-        df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
-        df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce")
-        df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
-        df = df[["open_time","Open","High","Low","Close","Volume"]].rename(columns={"open_time":"Datetime"})
-        df = df.set_index("Datetime").dropna()
+        cols = ["Open","High","Low","Close","Volume"]
+        for c in cols:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df["Datetime"] = pd.to_datetime(df["open_time"], unit="ms")
+        df = df[["Datetime"] + cols].dropna().set_index("Datetime")
         return df
     except Exception:
         return pd.DataFrame()
 
 # ---------------------------
-# Indicators (pure pandas)
+# Indicators (pandas only)
 # ---------------------------
 def ema(series: pd.Series, period: int):
     return series.ewm(span=period, adjust=False).mean()
@@ -104,76 +97,61 @@ def resample_to(df: pd.DataFrame, rule: str):
     return df.resample(rule).agg(ohlc).dropna()
 
 # ---------------------------
-# Market utilities: sizing, strength
+# Sizing, strength, utils
 # ---------------------------
-def pip_size_for_market(market_type: str):
-    if market_type == "crypto":
-        return None
-    return 0.0001
-
 def position_size(account_balance: float, risk_pct: float, entry: float, sl: float, market_type: str):
     if entry is None or sl is None:
-        return 0.0, "none", 0.0
+        return 0.0, "units", 0.0
     risk_amount = account_balance * (risk_pct / 100.0)
-    if market_type == "crypto":
-        price_diff = abs(entry - sl)
-        if price_diff <= 0:
-            return 0.0, "units", round(risk_amount, 2)
-        units = risk_amount / price_diff
-        return round(units, 6), "units", round(risk_amount, 2)
-    pip = pip_size_for_market(market_type)
-    if pip is None or pip == 0:
-        return 0.0, "lots", round(risk_amount, 2)
-    pip_distance = abs(entry - sl) / pip
-    if pip_distance <= 0:
-        return 0.0, "lots", round(risk_amount, 2)
-    pip_value_per_lot = 10.0
-    lots = risk_amount / (pip_distance * pip_value_per_lot)
-    return round(lots, 4), "lots", round(risk_amount, 2)
+    # Crypto: simple units sizing
+    price_diff = abs(entry - sl)
+    if price_diff <= 0:
+        return 0.0, "units", round(risk_amount, 2)
+    units = risk_amount / price_diff
+    return round(units, 6), "units", round(risk_amount, 2)
 
 def market_strength(df: pd.DataFrame):
     if df is None or len(df) < 20:
         return 0
-    closes = df["Close"].dropna()
-    x = np.arange(len(closes[-20:]))
-    y = closes[-20:].values
+    closes = df["Close"].tail(20).to_numpy()
+    x = np.arange(len(closes))
     if len(x) < 2:
         return 0
-    slope = np.polyfit(x, y, 1)[0]
-    momentum_score = np.clip((slope / (np.mean(y) + 1e-9)) * 10000, -50, 50)
+    slope = np.polyfit(x, closes, 1)[0]
+    momentum_score = np.clip((slope / (np.mean(closes) + 1e-9)) * 10000, -50, 50)
     vol = df["Close"].pct_change().rolling(14).std().iloc[-1]
-    vol_score = np.clip(vol * 1000, 0, 50)
-    score = 50 + momentum_score + vol_score
-    return int(np.clip(score, 0, 100))
+    vol_score = np.clip((vol or 0) * 1000, 0, 50)
+    score = int(np.clip(50 + momentum_score + vol_score, 0, 100))
+    return score
 
 # ---------------------------
-# Core scoring + signal generation (Multi-TF)
+# Signal generation (Multi-TF)
 # ---------------------------
 def score_and_generate(df1m: pd.DataFrame, market_label: str, cfg=DEFAULTS):
     out = {"signal":"NONE","entry":None,"sl":None,"tp":None,"rr":None,"confidence":0,"reasons":[],"strength":0}
     if df1m is None or df1m.empty:
         return out
 
-    # build MTFs
-    df5m = resample_to(df1m, "5T") if len(df1m) >= 5 else None
+    # Build MTF from 1m
+    df5m  = resample_to(df1m, "5T")  if len(df1m) >= 5  else None
     df15m = resample_to(df1m, "15T") if len(df1m) >= 15 else None
 
     price = float(df1m["Close"].iat[-1])
     out["entry"] = round(price, 8)
 
-    # indicators on 1m
+    # 1m indicators
     ema_s = float(ema(df1m["Close"], cfg["ema_short"]).iat[-1])
     ema_l = float(ema(df1m["Close"], cfg["ema_long"]).iat[-1])
     ema_trend = float(ema(df1m["Close"], cfg["ema_trend"]).iat[-1]) if len(df1m) >= cfg["ema_trend"] else ema_l
     r = float(rsi_wilder(df1m["Close"], cfg["rsi_p"]).iat[-1])
-    macd_l, macd_s, macd_h = macd_series(df1m["Close"], cfg["macd_fast"], cfg["macd_slow"], cfg["macd_sig"])
-    macd_dir = float(macd_l.iat[-1] - macd_s.iat[-1])
+    macd_l, macd_sig, macd_h = macd_series(df1m["Close"], cfg["macd_fast"], cfg["macd_slow"], cfg["macd_sig"])
+    macd_dir = float(macd_l.iat[-1] - macd_sig.iat[-1])
     bb_mid = df1m["Close"].rolling(cfg["bb_p"]).mean().iat[-1]
     bb_std = df1m["Close"].rolling(cfg["bb_p"]).std().iat[-1]
     z = (price - bb_mid) / bb_std if (not math.isnan(bb_std) and bb_std > 0) else 0.0
     atr_v = float(atr(df1m, cfg["atr_p"]).iat[-1]) if len(df1m) >= cfg["atr_p"] else None
 
-    # MTF alignment check
+    # MTF alignment
     mtf_ok = True
     for mdf, label in [(df5m, "5m"), (df15m, "15m")]:
         if mdf is None or mdf.empty:
@@ -192,7 +170,7 @@ def score_and_generate(df1m: pd.DataFrame, market_label: str, cfg=DEFAULTS):
             mtf_ok = False
             out["reasons"].append(f"{label} error")
 
-    # volume filter
+    # Volume filter
     vol_ok = True
     try:
         avg_vol = df1m["Volume"].rolling(20).mean().iat[-1]
@@ -203,7 +181,7 @@ def score_and_generate(df1m: pd.DataFrame, market_label: str, cfg=DEFAULTS):
     except Exception:
         vol_ok = True
 
-    # voting
+    # Votes
     votes_buy = votes_sell = 0
     if ema_s > ema_l:
         votes_buy += 1; out["confidence"] += 15; out["reasons"].append("EMA20>EMA50")
@@ -232,25 +210,29 @@ def score_and_generate(df1m: pd.DataFrame, market_label: str, cfg=DEFAULTS):
     elif z > 2:
         votes_sell += 1; out["reasons"].append("Above +2σ")
 
+    # Candlestick (simple engulfing)
     if len(df1m) >= 2:
         prev = df1m.iloc[-2]; cur = df1m.iloc[-1]
-        if (cur["Close"] > cur["Open"]) and (prev["Close"] < prev["Open"]) and (cur["Close"] > prev["Open"]) and (cur["Open"] < prev["Close"]):
+        bull_engulf = (cur["Close"] > cur["Open"]) and (prev["Close"] < prev["Open"]) and (cur["Close"] > prev["Open"]) and (cur["Open"] < prev["Close"])
+        bear_engulf = (cur["Close"] < cur["Open"]) and (prev["Close"] > prev["Open"]) and (cur["Close"] < prev["Open"]) and (cur["Open"] > prev["Close"])
+        if bull_engulf:
             votes_buy += 1; out["confidence"] += 8; out["reasons"].append("Bullish engulfing")
-        if (cur["Close"] < cur["Open"]) and (prev["Close"] > prev["Open"]) and (cur["Close"] < prev["Open"]) and (cur["Open"] > prev["Close"]):
+        if bear_engulf:
             votes_sell += 1; out["confidence"] -= 5; out["reasons"].append("Bearish engulfing")
 
-    # final decision requires filters
+    # Final signal
     if not vol_ok or not mtf_ok:
         final_signal = "NONE"
     else:
         final_signal = "BUY" if votes_buy > votes_sell else ("SELL" if votes_sell > votes_buy else "NONE")
-
     out["signal"] = final_signal
 
-    # compute SL/TP as 1 ATR and force RR = 1:3
+    # SL/TP with fixed RR=1:3
     if final_signal in ["BUY", "SELL"]:
         if atr_v is None or atr_v == 0 or math.isnan(atr_v):
-            atr_px = (df1m["Close"].pct_change().rolling(14).std().iat[-1] if len(df1m) >= 14 else 0.001) * price
+            # Fallback: 14-bar std of returns * price
+            volatility = df1m["Close"].pct_change().rolling(14).std().iat[-1] if len(df1m) >= 14 else 0.001
+            atr_px = volatility * price
         else:
             atr_px = atr_v
         if final_signal == "BUY":
@@ -271,7 +253,7 @@ def score_and_generate(df1m: pd.DataFrame, market_label: str, cfg=DEFAULTS):
     return out
 
 # ---------------------------
-# Backtest (simple)
+# Backtest (simple, fast)
 # ---------------------------
 def backtest_df(df: pd.DataFrame, market_label: str, cfg=DEFAULTS, max_hold_bars: int = 240):
     results = []
@@ -279,7 +261,7 @@ def backtest_df(df: pd.DataFrame, market_label: str, cfg=DEFAULTS, max_hold_bars
     if n < 200:
         return {"error": "Not enough data for backtest (need >=200 bars)."}
     for i in range(200, n - 2):
-        window = df.iloc[: i + 1].copy()
+        window = df.iloc[: i + 1]
         res = score_and_generate(window, market_label, cfg=cfg)
         if res["signal"] in ["BUY", "SELL"] and res["confidence"] >= cfg["min_confidence"]:
             if i + 1 >= n:
@@ -288,19 +270,19 @@ def backtest_df(df: pd.DataFrame, market_label: str, cfg=DEFAULTS, max_hold_bars
             sl = res["sl"]; tp = res["tp"]
             if sl is None or tp is None:
                 continue
-            outcome = None; exit_idx = None
+            outcome = None
             for j in range(i + 1, min(n, i + 1 + max_hold_bars)):
                 high = float(df["High"].iat[j]); low = float(df["Low"].iat[j])
                 if res["signal"] == "BUY":
                     if high >= tp:
-                        outcome = "TP"; exit_idx = j; break
+                        outcome = "TP"; break
                     if low <= sl:
-                        outcome = "SL"; exit_idx = j; break
+                        outcome = "SL"; break
                 else:
                     if low <= tp:
-                        outcome = "TP"; exit_idx = j; break
+                        outcome = "TP"; break
                     if high >= sl:
-                        outcome = "SL"; exit_idx = j; break
+                        outcome = "SL"; break
             if outcome == "TP":
                 pnl = abs(tp - entry_price)
             elif outcome == "SL":
@@ -319,7 +301,7 @@ def backtest_df(df: pd.DataFrame, market_label: str, cfg=DEFAULTS, max_hold_bars
     return {"trades": len(results), "wins": wins, "losses": losses, "timeouts": timeouts, "winrate": winrate, "net_pnl": net}
 
 # ---------------------------
-# Telegram helper
+# Telegram alerts
 # ---------------------------
 def send_telegram(bot_token: str, chat_id: str, text: str):
     if not bot_token or not chat_id:
@@ -332,33 +314,36 @@ def send_telegram(bot_token: str, chat_id: str, text: str):
         return False, str(e)
 
 # ---------------------------
-# Streamlit UI (single file)
+# UI
 # ---------------------------
 st.title("🚀 Pro Trading Bot — Live Signals (1:3 RR)")
 
 left, right = st.columns([1, 2])
+
 with left:
     st.subheader("Configuration")
     market_label = st.selectbox("Market", list(MARKETS.keys()), index=0)
     interval_choice = st.selectbox("Interval (entry TF)", ["1m", "5m", "15m"], index=0)
     account_balance = st.number_input("Account balance (USD)", min_value=10.0, value=1000.0, step=50.0)
     risk_pct = st.number_input("Risk % per trade", min_value=0.1, max_value=5.0, value=1.0, step=0.1)
+
     st.markdown("---")
     st.subheader("Telegram Alerts (optional)")
     tg_token = st.text_input("Telegram Bot token", value="", type="password")
     tg_chat = st.text_input("Telegram chat id", value="")
+
     st.markdown("---")
-    st.subheader("History")
+    st.subheader("Signal History (latest 25)")
     if os.path.exists(HISTORY_FILE):
         hist = pd.read_csv(HISTORY_FILE)
         st.dataframe(hist.sort_values("timestamp", ascending=False).head(25))
     else:
-        st.write("No history yet.")
+        st.caption("No history yet.")
 
 with right:
     st.subheader("TradingView (visual)")
     tv_sym = MARKETS[market_label]["sym"]
-    # Option A: compute interval token (no backslashes inside f-string)
+    # Option A: compute the interval token safely (no escapes inside f-string)
     interval_no_m = interval_choice.replace("m", "")
     iframe = f'<iframe src="https://s.tradingview.com/widgetembed/?symbol=BINANCE:{tv_sym}&interval={interval_no_m}&hidesidetoolbar=1&symboledit=1&hideideas=1&theme=dark" width="100%" height="520" frameborder="0"></iframe>'
     st.components.v1.html(iframe, height=540)
@@ -366,7 +351,7 @@ with right:
 
     if st.button("🔮 Generate Signal"):
         with st.spinner("Fetching data and analyzing..."):
-            # Always fetch 1m bars and resample for multi-TF
+            # Always fetch 1m and resample internally for MTF
             df1m = fetch_klines_binance(MARKETS[market_label]["sym"], interval="1m", limit=1500)
             if df1m is None or df1m.empty:
                 st.error("Failed to fetch market data from Binance public API.")
@@ -387,7 +372,8 @@ with right:
                         with st.expander("Why this signal?"):
                             for r in result["reasons"]:
                                 st.write("•", r)
-                    # save to history
+
+                    # Save to history
                     row = {
                         "timestamp": datetime.utcnow().isoformat(),
                         "market": market_label,
@@ -410,9 +396,14 @@ with right:
                     else:
                         pd.DataFrame([row]).to_csv(HISTORY_FILE, index=False)
                     st.info("Signal saved to bot_data/signal_history.csv")
-                    # send telegram
+
+                    # Telegram alert
                     if tg_token and tg_chat:
-                        text = f"Signal {result['signal']} {market_label}\\nEntry:{result['entry']}\\nSL:{result['sl']}\\nTP:{result['tp']}\\nRR:{result.get('rr')}\\nConf:{result['confidence']}"
+                        text = (
+                            f"Signal {result['signal']} {market_label}\n"
+                            f"Entry: {result['entry']}\nSL: {result['sl']}\nTP: {result['tp']}\n"
+                            f"RR: {result.get('rr')}\nConfidence: {result['confidence']}\nStrength: {result['strength']}"
+                        )
                         ok, resp = send_telegram(tg_token, tg_chat, text)
                         if ok:
                             st.success("Telegram alert sent")
@@ -420,14 +411,15 @@ with right:
                             st.error(f"Telegram failed: {resp}")
 
 # ---------------------------
-# Backtest & Market Scan
+# Backtest & Market Scanner
 # ---------------------------
 st.markdown("---")
 st.subheader("Backtest & Market Scanner")
 col_a, col_b = st.columns(2)
+
 with col_a:
-    if st.button("Run Backtest (90d approx)"):
-        st.info("Running backtest (may take 1-3 minutes)...")
+    if st.button("Run Backtest (approx 90d)"):
+        st.info("Running backtest, please wait…")
         df_bt = fetch_klines_binance(MARKETS[market_label]["sym"], interval="1m", limit=90*24*60)
         if df_bt is None or df_bt.empty:
             st.error("Not enough data for backtest.")
@@ -440,7 +432,8 @@ with col_a:
                 st.metric("Wins", stats["wins"])
                 st.metric("Losses", stats["losses"])
                 st.metric("Timeouts", stats["timeouts"])
-                st.metric("Win rate", f\"{stats['winrate']:.1f}%\" if stats['winrate'] else "N/A")
+                winrate_display = f"{stats['winrate']:.1f}%" if stats.get("winrate") else "N/A"
+                st.metric("Win rate", winrate_display)
                 st.write("Net P/L (price units):", stats["net_pnl"])
 
 with col_b:
@@ -451,18 +444,22 @@ with col_b:
             if df is None or df.empty:
                 continue
             r = score_and_generate(df, mk, cfg=DEFAULTS)
-            scan.append({"market": mk, "signal": r["signal"], "confidence": r["confidence"], "strength": r["strength"], "entry": r["entry"], "sl": r["sl"], "tp": r["tp"]})
-            time.sleep(0.2)
+            scan.append({
+                "market": mk, "signal": r["signal"], "confidence": r["confidence"],
+                "strength": r["strength"], "entry": r["entry"], "sl": r["sl"], "tp": r["tp"]
+            })
+            time.sleep(0.2)  # be gentle with API
         if not scan:
             st.warning("Scanner returned no results.")
         else:
             dfscan = pd.DataFrame(scan).sort_values(["confidence", "strength"], ascending=False)
             st.dataframe(dfscan)
-            st.info("Scanner complete. Use Telegram fields to auto-send top signals if desired.")
+            st.info("Scanner complete.")
 
-# Download history CSV
+# Download history
 st.markdown("---")
 if os.path.exists(HISTORY_FILE):
     with open(HISTORY_FILE, "rb") as f:
         st.download_button("Download signal history CSV", data=f, file_name="signal_history.csv")
-st.caption("Educational tool. Paper-test extensively. Not financial advice.")
+
+st.caption("This tool is for education/testing. Always paper trade first. Not financial advice.")
