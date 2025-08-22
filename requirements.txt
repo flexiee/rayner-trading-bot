@@ -1,5 +1,6 @@
 streamlit
+yfinance
 pandas
 numpy
-yfinance
-tradingview-ta
+tradingview_ta
+python-telegram-bot
