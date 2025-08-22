@@ -1,183 +1,124 @@
-# rayner_bot.py
-import os
-import time
-from datetime import datetime
-
-import pandas as pd
-import numpy as np
 import streamlit as st
 import yfinance as yf
-from tradingview_ta import TA_Handler, Interval
+import pandas as pd
+import numpy as np
+from tradingview_ta import TA_Handler, Interval, Exchange
+from datetime import datetime, timedelta
 
-# ---------------------------
-# App Config
-# ---------------------------
-st.set_page_config(page_title="Rayner Trading Bot", layout="wide")
-st.title("📈 Rayner Trading Bot (Fixed Version)")
+# --- Utility Functions ---
 
-# ---------------------------
-# Market Config
-# ---------------------------
-MARKETS = {
-    "EUR/USD": {"tv_symbol": "EURUSD", "exchange": "OANDA", "screener": "FOREX", "yf": "EURUSD=X"},
-    "USD/JPY": {"tv_symbol": "USDJPY", "exchange": "OANDA", "screener": "FOREX", "yf": "JPY=X"},
-    "XAU/USD (Gold)": {"tv_symbol": "XAUUSD", "exchange": "OANDA", "screener": "FOREX", "yf": "GC=F"},
-    "BTC/USD": {"tv_symbol": "BTCUSDT", "exchange": "BINANCE", "screener": "CRYPTO", "yf": "BTC-USD"},
-    "ETH/USD": {"tv_symbol": "ETHUSDT", "exchange": "BINANCE", "screener": "CRYPTO", "yf": "ETH-USD"},
-}
+def fetch_price_yahoo(symbol, tf="1m", period="5d"):
+    df = yf.download(tickers=symbol, period=period, interval=tf)
+    return df
 
-TV_INTERVALS = {
-    "1m": Interval.INTERVAL_1_MINUTE,
-    "5m": Interval.INTERVAL_5_MINUTES,
-    "15m": Interval.INTERVAL_15_MINUTES,
-    "1h": Interval.INTERVAL_1_HOUR,
-    "4h": Interval.INTERVAL_4_HOURS,
-}
+def get_tradingview_signal(symbol, screener, exchange, tf):
+    handler = TA_Handler(
+        symbol=symbol,
+        screener=screener,
+        exchange=exchange,
+        interval=getattr(Interval, tf)
+    )
+    analysis = handler.get_analysis()
+    return analysis
 
-# ---------------------------
-# Functions
-# ---------------------------
-def get_tv_analysis(symbol, exchange, screener, interval):
-    """Fetch TradingView summary for a symbol."""
-    try:
-        handler = TA_Handler(
-            symbol=symbol,
-            exchange=exchange,
-            screener=screener,
-            interval=interval
-        )
-        return handler.get_analysis()
-    except Exception as e:
-        st.error(f"TradingView error: {e}")
-        return None
+def calculate_indicators(df):
+    # EMA 50/200
+    df['EMA50'] = df['Close'].ewm(span=50, adjust=False).mean()
+    df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
+    # RSI
+    delta = df['Close'].diff()
+    up = delta.clip(lower=0)
+    down = -1*delta.clip(upper=0)
+    ema_up = up.ewm(com=13, adjust=False).mean()
+    ema_down = down.ewm(com=13, adjust=False).mean()
+    rs = ema_up / ema_down
+    df['RSI'] = 100 - (100 / (1 + rs))
+    # MACD
+    ema12 = df['Close'].ewm(span=12, adjust=False).mean()
+    ema26 = df['Close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = ema12 - ema26
+    df['MACD_signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    # Bollinger Bands
+    df['BB_Mid'] = df['Close'].rolling(window=20).mean()
+    df['BB_Std'] = df['Close'].rolling(window=20).std()
+    df['BB_Upper'] = df['BB_Mid'] + 2 * df['BB_Std']
+    df['BB_Lower'] = df['BB_Mid'] - 2 * df['BB_Std']
+    # ATR
+    df['H-L'] = df['High'] - df['Low']
+    df['H-PC'] = np.abs(df['High'] - df['Close'].shift(1))
+    df['L-PC'] = np.abs(df['Low'] - df['Close'].shift(1))
+    df['TR'] = df[['H-L', 'H-PC', 'L-PC']].max(axis=1)
+    df['ATR'] = df['TR'].rolling(window=14).mean()
+    return df
 
-
-def generate_signal(market_key, interval_key):
-    """Generate trading signal with TP/SL."""
-    m = MARKETS[market_key]
-    analysis = get_tv_analysis(m["tv_symbol"], m["exchange"], m["screener"], TV_INTERVALS[interval_key])
-
-    if not analysis:
-        return {"error": "No analysis available."}
-
-    summary = analysis.summary
-    indicators = analysis.indicators
-
-    # Direction
-    rec = summary.get("RECOMMENDATION", "NEUTRAL").upper()
-    direction = "WAIT"
-    if "BUY" in rec:
-        direction = "BUY"
-    elif "SELL" in rec:
-        direction = "SELL"
-
-    # Entry price
-    entry = indicators.get("close") or indicators.get("Close")
-    if not entry and m.get("yf"):
-        try:
-            df = yf.download(m["yf"], period="1d", interval="1m")
-            entry = float(df["Close"].iloc[-1])
-        except:
-            entry = None
-
-    # Risk/Reward
-    if entry:
-        sl = round(entry * (0.99 if direction == "BUY" else 1.01), 5)
-        tp = round(entry * (1.03 if direction == "BUY" else 0.97), 5)
-        rr = 3.0
+def generate_signal(df):
+    # Basic: EMA, RSI, MACD, Bollinger, ATR confluence for BUY/SELL
+    # EMA trend
+    last = df.iloc[-1]
+    ema_bull = last['EMA50'] > last['EMA200']
+    ema_bear = last['EMA50'] < last['EMA200']
+    # RSI
+    rsi_bull = last['RSI'] > 55
+    rsi_bear = last['RSI'] < 45
+    # MACD
+    macd_bull = last['MACD'] > last['MACD_signal']
+    macd_bear = last['MACD'] < last['MACD_signal']
+    # Bollinger Band
+    bb_buy = last['Close'] < last['BB_Lower']
+    bb_sell = last['Close'] > last['BB_Upper']
+    # Signal voting
+    buy_votes = sum([ema_bull, rsi_bull, macd_bull, bb_buy])
+    sell_votes = sum([ema_bear, rsi_bear, macd_bear, bb_sell])
+    if buy_votes >= 3:
+        return "BUY", buy_votes
+    elif sell_votes >= 3:
+        return "SELL", sell_votes
     else:
-        sl = tp = rr = None
+        return "WAIT", max(buy_votes, sell_votes)
 
-    return {
-        "direction": direction,
-        "entry": entry,
-        "sl": sl,
-        "tp": tp,
-        "rr": rr,
-        "summary": summary,
-    }
+def calc_position(account_balance, risk_pct, sl_pips, pip_value):
+    # Risk = account_balance * risk_pct
+    # position_size = risk_amt / (sl_pips * pip_value)
+    risk_amt = account_balance * (risk_pct/100)
+    lots = risk_amt / (sl_pips * pip_value)
+    return round(lots, 2)
 
+# --- Streamlit UI ---
 
-def run_backtest(market_key, interval="15m"):
-    """Simple backtest with EMA/RSI strategy."""
-    yf_symbol = MARKETS[market_key]["yf"]
-    df = yf.download(yf_symbol, period="60d", interval=interval)
+st.title("Pro Trading Signals Bot")
 
-    if df.empty:
-        return {"error": "No data for backtest"}
+markets = {
+    "EURUSD": {"symbol":"EURUSD", "exchange":"FX_IDC", "screener":"forex", "pip":0.0001},
+    "XAUUSD": {"symbol":"XAUUSD", "exchange":"OANDA", "screener":"forex", "pip":0.1},
+    "BTCUSD": {"symbol":"BTCUSD", "exchange":"BINANCE", "screener":"crypto", "pip":1}
+}
+selected = st.selectbox("Select Market", list(markets.keys()))
+tf = st.selectbox("Select Timeframe", ["INTERVAL_1_MINUTE", "INTERVAL_5_MINUTES", "INTERVAL_15_MINUTES", "INTERVAL_1_HOUR"])
+acc_bal = st.number_input("Account Balance ($)", value=1000)
+risk_pct = st.slider("Risk per trade (%)", 0.5, 2.0, 1.0, 0.1)
 
-    df["EMA20"] = df["Close"].ewm(span=20).mean()
-    df["EMA50"] = df["Close"].ewm(span=50).mean()
-    df["RSI"] = ta_rsi(df["Close"])
+if st.button("Generate Signal"):
+    m = markets[selected]
+    df = fetch_price_yahoo(m["symbol"]+"=X" if "forex" in m["screener"] else m["symbol"], period="10d", tf="1m")
+    df = calculate_indicators(df)
+    signal, votes = generate_signal(df)
+    entry = float(df.iloc[-1]['Close'])
+    atr = float(df.iloc[-1]['ATR']) if not np.isnan(df.iloc[-1]['ATR']) else m["pip"]*10
+    sl = round(entry - atr*0.3, 5) if signal=="BUY" else round(entry + atr*0.3, 5)
+    tp = round(entry + (entry-sl)*3, 5) if signal=="BUY" else round(entry - (sl-entry)*3, 5)
+    pip_value = m["pip"]*10000 if "forex" in m["screener"] else m["pip"]
+    sl_pips = abs(entry-sl)/m["pip"]
+    lots = calc_position(acc_bal, risk_pct, sl_pips, pip_value)
+    conf = int((votes/4)*100)
+    st.metric(label="Signal", value=signal)
+    st.metric(label="Entry Price", value=entry)
+    st.metric(label="Stop Loss", value=sl)
+    st.metric(label="Take Profit", value=tp)
+    st.metric(label="R:R", value="1:3")
+    st.metric(label="Confidence %", value=conf)
+    st.metric(label="Recommended Lot Size", value=lots)
+    # Save to history - Could write to a .csv or SQL db for review/journal
 
-    signals = []
-    for i in range(50, len(df)):
-        if df["EMA20"].iloc[i] > df["EMA50"].iloc[i] and df["RSI"].iloc[i] > 50:
-            signals.append("BUY")
-        elif df["EMA20"].iloc[i] < df["EMA50"].iloc[i] and df["RSI"].iloc[i] < 50:
-            signals.append("SELL")
-        else:
-            signals.append("WAIT")
+st.info("This is a professional trading assistant, not a guarantee of profits. Apply smart risk management always.")
 
-    win_rate = (signals.count("BUY") + signals.count("SELL")) / len(signals) * 100
-    return {"trades": len(signals), "win_rate": round(win_rate, 2)}
-
-
-def ta_rsi(series, period=14):
-    delta = series.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(period).mean()
-    avg_loss = loss.rolling(period).mean()
-    rs = avg_gain / (avg_loss + 1e-9)
-    return 100 - (100 / (1 + rs))
-
-
-def run_scanner(interval_key):
-    results = []
-    for m in MARKETS:
-        analysis = get_tv_analysis(
-            MARKETS[m]["tv_symbol"], MARKETS[m]["exchange"], MARKETS[m]["screener"], TV_INTERVALS[interval_key]
-        )
-        if analysis:
-            rec = analysis.summary.get("RECOMMENDATION", "NEUTRAL")
-            results.append({"Market": m, "Signal": rec})
-        time.sleep(0.2)
-    return pd.DataFrame(results)
-
-# ---------------------------
-# UI
-# ---------------------------
-col1, col2 = st.columns([1, 2])
-
-with col1:
-    st.subheader("⚙️ Settings")
-    market = st.selectbox("Select Market", list(MARKETS.keys()))
-    tf = st.selectbox("Timeframe", list(TV_INTERVALS.keys()))
-
-    if st.button("🔮 Generate Signal"):
-        sig = generate_signal(market, tf)
-        if "error" in sig:
-            st.error(sig["error"])
-        else:
-            st.success(f"{market} | {tf} | {sig['direction']}")
-            st.write(f"Entry: {sig['entry']} | SL: {sig['sl']} | TP: {sig['tp']} | R:R = {sig['rr']}")
-
-    if st.button("📊 Run Backtest"):
-        res = run_backtest(market)
-        if "error" in res:
-            st.error(res["error"])
-        else:
-            st.info(f"Trades: {res['trades']} | Win Rate: {res['win_rate']}%")
-
-    if st.button("📡 Run Market Scanner"):
-        scan = run_scanner(tf)
-        st.dataframe(scan)
-
-with col2:
-    st.subheader("📺 Live Chart")
-    sym = MARKETS[market]["tv_symbol"]
-    exch = MARKETS[market]["exchange"]
-    iframe = f"""<iframe src="https://s.tradingview.com/widgetembed/?symbol={exch}:{sym}&interval=5&theme=dark"
-                 width="100%" height="500" frameborder="0"></iframe>"""
-    st.markdown(iframe, unsafe_allow_html=True)
+# -- Optionally add Telegram alerts and full backtest module per requirements (expand as desired)
